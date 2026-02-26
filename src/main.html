@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Agentic Browser Dashboard</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "primary": "#1325ec",
+                        "background-light": "#f6f6f8",
+                        "background-dark": "#101222",
+                    },
+                    fontFamily: {
+                        "display": ["Inter", "sans-serif"],
+                        "mono": ["ui-monospace", "SFMono-Regular", "Menlo", "Monaco", "Consolas", "Liberation Mono", "Courier New", "monospace"]
+                    },
+                    borderRadius: {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                },
+            },
+        }
+    </script>
+<style>
+        body { font-family: 'Inter', sans-serif; }
+        .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+        .terminal-scroll::-webkit-scrollbar { width: 6px; }
+        .terminal-scroll::-webkit-scrollbar-track { background: transparent; }
+        .terminal-scroll::-webkit-scrollbar-thumb { background: #323767; border-radius: 10px; }
+    </style>
+</head>
+<body class="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 min-h-screen flex flex-col overflow-hidden">
+<!-- Top Navigation Bar -->
+<header class="flex items-center justify-between h-16 px-6 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-background-dark shrink-0 z-20">
+<div class="flex items-center gap-3">
+<div class="size-8 bg-primary rounded flex items-center justify-center text-white">
+<span class="material-symbols-outlined">explore</span>
+</div>
+<h1 class="text-lg font-bold tracking-tight">Agentic Browser</h1>
+</div>
+<div class="flex items-center gap-6">
+<div id="agent-status" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-500/10 text-slate-500 text-xs font-semibold">
+<span class="relative flex h-2 w-2">
+<span id="status-ping" class="absolute inline-flex h-full w-full rounded-full bg-slate-400 opacity-75"></span>
+<span id="status-dot" class="relative inline-flex rounded-full h-2 w-2 bg-slate-500"></span>
+</span>
+<span id="status-text">Connecting...</span>
+</div>
+<div class="flex items-center gap-3">
+<button class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500">
+<span class="material-symbols-outlined">notifications</span>
+</button>
+<button class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500">
+<span class="material-symbols-outlined">settings</span>
+</button>
+<div class="h-8 w-px bg-slate-200 dark:border-slate-800 mx-1"></div>
+<div class="flex items-center gap-3 ml-1">
+<div class="text-right hidden sm:block">
+<p class="text-sm font-medium">Alex Chen</p>
+<p class="text-xs text-slate-500">Pro Tier</p>
+</div>
+<div class="size-9 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center overflow-hidden">
+<img class="w-full h-full object-cover" data-alt="User profile avatar" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCETJmNOPsHeAlSGhOl9AbAUXuHa7RB6TMXF-A5TrUUl5FCymDLYCfZL9uaW-HOTMrN8sZA1rCBiGoH2T6GteWRrTdk7znUrFFHmhI3P5KjcG93zOaV7CrsAuyhwAbkF5W-s_t-XCqwt1krKbYFDe_uucvUMstXkBaOB7k0VaRod-YKEgfAdHD0JYsL_xp-_XLMsHyiwv7dC8VKjp5eFeYhOCazaCGfdFJyCNKF_mt8JaPBrlRQobXpsBauvIL8Fua0NPOho4qNjEuw"/>
+</div>
+</div>
+</div>
+</div>
+</header>
+<div class="flex flex-1 overflow-hidden">
+<!-- Left Sidebar: Task Control -->
+<aside class="w-80 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-background-dark flex flex-col shrink-0">
+<div class="p-5 flex flex-col gap-6 flex-1 overflow-y-auto">
+<div class="space-y-1">
+<h2 class="text-sm font-bold uppercase tracking-wider text-slate-500">Task Control</h2>
+<p class="text-xs text-slate-400">Configure &amp; Execute Agent</p>
+</div>
+<!-- Goal Input -->
+<div class="space-y-2">
+<label class="text-sm font-medium flex items-center justify-between">
+                        Goal <span class="text-xs text-primary font-bold">REQUIRED</span>
+</label>
+<textarea id="goal-input" class="w-full h-28 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 p-3 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none resize-none placeholder:text-slate-500", placeholder="네이버에서 최신 세계 카테고리의 뉴스를 수집해주세요. "></textarea>
+
+</div>
+<!-- Start URL Input -->
+<div class="space-y-2">
+<label class="text-sm font-medium text-slate-600 dark:text-slate-400 flex items-center gap-1">
+                        Start URL <span class="text-[10px] font-normal opacity-60">(Optional)</span>
+</label>
+<input id="start-url-input" type="url" class="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 p-3 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none placeholder:text-slate-500" placeholder="https://news.naver.com"/>
+</div>
+<!-- Direction Input -->
+<div class="space-y-2">
+<label class="text-sm font-medium text-slate-600 dark:text-slate-400 flex items-center gap-1">
+                        Direction <span class="text-[10px] font-normal opacity-60">(Optional)</span>
+</label>
+<textarea id="direction-input" class="w-full h-24 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 p-3 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none resize-none placeholder:text-slate-500" placeholder="Specific steps for the agent..."></textarea>
+</div>
+<!-- Context Area -->
+<div class="space-y-3">
+<label class="text-sm font-medium">Context Assets</label>
+<div class="flex flex-wrap gap-2">
+<div class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs">
+<span class="material-symbols-outlined text-sm text-primary">description</span>
+                            apt_ids.csv
+                            <button class="hover:text-red-500"><span class="material-symbols-outlined text-xs">close</span></button>
+</div>
+<div class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-primary/10 border border-primary/20 text-xs text-primary font-medium">
+<span class="material-symbols-outlined text-sm">verified_user</span>
+                            Login info saved
+                        </div>
+<button class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-dashed border-slate-300 dark:border-slate-700 text-xs text-slate-500 hover:border-primary hover:text-primary transition-colors">
+<span class="material-symbols-outlined text-sm">add_circle</span>
+                            Add Context
+                        </button>
+</div>
+</div>
+</div>
+<!-- Sidebar Footer -->
+<div class="p-5 border-t border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-background-dark/50">
+<button id="execute-btn" class="w-full py-3 bg-primary hover:bg-primary/90 text-white rounded-lg font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-primary/20">
+<span class="material-symbols-outlined" id="execute-icon">play_arrow</span>
+<span id="execute-text">Execute Agent Task</span>
+</button>
+</div>
+</aside>
+<!-- Main Content Area -->
+<main class="flex-1 flex flex-col min-w-0 bg-slate-100 dark:bg-[#0b0c1a]">
+<!-- Live Agent Viewport -->
+<div class="flex-1 p-6 pb-3 flex flex-col min-h-0">
+<div class="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 flex flex-col flex-1 shadow-2xl overflow-hidden">
+<!-- Browser Header -->
+<div class="h-12 flex items-center px-4 bg-slate-100 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-800 gap-4">
+<div class="flex gap-2">
+<div class="size-3 rounded-full bg-red-400"></div>
+<div class="size-3 rounded-full bg-amber-400"></div>
+<div class="size-3 rounded-full bg-emerald-400"></div>
+</div>
+<div class="flex-1 max-w-2xl mx-auto flex items-center h-8 bg-white dark:bg-slate-950 rounded-md border border-slate-200 dark:border-slate-800 px-3 gap-2">
+<span class="material-symbols-outlined text-sm text-slate-400">lock</span>
+<span id="browser-url" class="text-xs text-slate-600 dark:text-slate-300 truncate font-medium">about:blank</span>
+<div class="ml-auto flex items-center">
+<span class="material-symbols-outlined text-sm text-slate-400">refresh</span>
+</div>
+</div>
+<div class="flex gap-4">
+<span class="material-symbols-outlined text-slate-400">more_vert</span>
+</div>
+</div>
+<!-- Browser Content (Live View) -->
+<div id="browser-content" class="flex-1 relative bg-slate-50 dark:bg-slate-900 overflow-hidden">
+<!-- 대기 상태 표시 -->
+<div id="browser-placeholder" class="absolute inset-0 flex items-center justify-center">
+<div class="text-center space-y-4">
+<span class="material-symbols-outlined text-6xl text-slate-300 dark:text-slate-700">explore</span>
+<p class="text-slate-400 dark:text-slate-600 text-sm">Goal을 입력하고 Execute를 클릭하면<br>에이전트가 브라우저를 조작합니다</p>
+</div>
+</div>
+<!-- 스크린샷 표시 영역 -->
+<img id="browser-screenshot" class="absolute inset-0 w-full h-full object-contain hidden" alt="Browser screenshot" />
+</div>
+</div>
+</div>
+<!-- Agent Logic Stream (Terminal) -->
+<div class="h-72 px-6 pb-6 shrink-0">
+<div class="h-full bg-white dark:bg-slate-950 rounded-xl border border-slate-200 dark:border-slate-800 shadow-lg flex flex-col overflow-hidden">
+<div class="h-10 flex items-center justify-between px-4 border-b border-slate-100 dark:border-slate-900 bg-slate-50 dark:bg-slate-900/50">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-sm text-primary">terminal</span>
+<span class="text-xs font-bold uppercase tracking-wider text-slate-500">Agent Logic Stream</span>
+</div>
+<div class="flex items-center gap-3">
+<span id="runtime-display" class="text-[10px] font-mono text-slate-500">RUNTIME: 00:00:00</span>
+<button class="text-xs text-slate-400 hover:text-slate-600"><span class="material-symbols-outlined text-sm">content_copy</span></button>
+</div>
+</div>
+<div id="log-stream" class="flex-1 p-4 font-mono text-sm terminal-scroll overflow-y-auto space-y-2.5">
+<div class="flex gap-3 opacity-60">
+<span class="text-slate-500 shrink-0">[--:--:--]</span>
+<div class="flex items-center gap-2">
+<span class="size-2 rounded-full bg-slate-400"></span>
+<span class="text-slate-500 font-bold">System:</span>
+<span class="text-slate-400">서버 연결 대기 중...</span>
+</div>
+</div>
+</div>
+</div>
+</div>
+</main>
+</div>
+<script>
+// === Agentic Browser WebSocket Client ===
+const WS_URL = `ws://${location.host}/ws`;
+
+// DOM 요소
+const goalInput = document.getElementById('goal-input');
+const startUrlInput = document.getElementById('start-url-input');
+const directionInput = document.getElementById('direction-input');
+const executeBtn = document.getElementById('execute-btn');
+const executeIcon = document.getElementById('execute-icon');
+const executeText = document.getElementById('execute-text');
+const agentStatus = document.getElementById('agent-status');
+const statusPing = document.getElementById('status-ping');
+const statusDot = document.getElementById('status-dot');
+const statusTextEl = document.getElementById('status-text');
+const browserUrl = document.getElementById('browser-url');
+const browserPlaceholder = document.getElementById('browser-placeholder');
+const browserScreenshot = document.getElementById('browser-screenshot');
+const logStream = document.getElementById('log-stream');
+const runtimeDisplay = document.getElementById('runtime-display');
+
+let ws = null;
+let isRunning = false;
+let runtimeInterval = null;
+let runtimeSeconds = 0;
+
+// 에이전트 색상 매핑
+const AGENT_COLORS = {
+    'System': { dot: 'bg-slate-400', text: 'text-slate-500' },
+    'Scout': { dot: 'bg-blue-500', text: 'text-blue-500' },
+    'Planner': { dot: 'bg-purple-500', text: 'text-purple-500' },
+    'Auth': { dot: 'bg-emerald-500', text: 'text-emerald-500' },
+    'Executor': { dot: 'bg-amber-500', text: 'text-amber-500' },
+    'Validator': { dot: 'bg-cyan-500', text: 'text-cyan-500' },
+    'Observer': { dot: 'bg-rose-500', text: 'text-rose-500' },
+};
+
+function getAgentColor(agent) {
+    return AGENT_COLORS[agent] || AGENT_COLORS['System'];
+}
+
+// WebSocket 연결
+function connectWS() {
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+        setStatus('idle', 'Agent Online');
+        addLog('System', '서버 연결 완료');
+    };
+
+    ws.onclose = () => {
+        setStatus('offline', 'Disconnected');
+        setTimeout(connectWS, 3000); // 3초 후 재연결
+    };
+
+    ws.onerror = () => {
+        setStatus('offline', 'Connection Error');
+    };
+
+    ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        handleMessage(msg);
+    };
+}
+
+// 메시지 핸들러
+function handleMessage(msg) {
+    switch (msg.type) {
+        case 'status':
+            if (msg.status === 'running') {
+                setStatus('running', 'Agent Running');
+                setRunning(true);
+            } else if (msg.status === 'idle') {
+                setStatus('idle', 'Agent Online');
+                setRunning(false);
+            } else if (msg.status === 'stopped' || msg.status === 'cancelled') {
+                setStatus('idle', 'Agent Online');
+                setRunning(false);
+                addLog('System', msg.message || '에이전트 중지됨');
+            }
+            break;
+
+        case 'log':
+            addLog(msg.agent || 'System', msg.message);
+            break;
+
+        case 'step':
+            // 스텝 로그 추가
+            const stepAgent = msg.success ? 'Executor' : 'System';
+            addLog(stepAgent, `Step ${msg.step}: ${msg.detail}`, msg.timestamp);
+            // URL 업데이트
+            if (msg.url) browserUrl.textContent = msg.url.replace(/^https?:\/\//, '');
+            // 스크린샷 업데이트
+            if (msg.screenshot) {
+                browserScreenshot.src = `data:image/jpeg;base64,${msg.screenshot}`;
+                browserScreenshot.classList.remove('hidden');
+                browserPlaceholder.classList.add('hidden');
+            }
+            break;
+
+        case 'result':
+            const resultIcon = msg.success ? '✓' : '✗';
+            addLog('System', `${resultIcon} 완료: ${msg.message} (${msg.total_steps}스텝, 실패 ${msg.failure_count}회)`);
+            setRunning(false);
+            setStatus('idle', 'Agent Online');
+            break;
+
+        case 'error':
+            addLog('System', `오류: ${msg.message}`, null, true);
+            break;
+    }
+}
+
+// 로그 추가
+function addLog(agent, message, timestamp = null, isError = false) {
+    const time = timestamp || new Date().toLocaleTimeString('ko-KR', { hour12: false });
+    const colors = getAgentColor(agent);
+
+    const entry = document.createElement('div');
+    entry.className = `flex gap-3 ${isError ? '' : ''}`;
+    entry.innerHTML = `
+        <span class="text-slate-500 shrink-0">[${time}]</span>
+        <div class="flex items-start gap-2">
+            <span class="size-2 rounded-full ${colors.dot} mt-1.5 shrink-0"></span>
+            <span class="${colors.text} font-bold shrink-0">${agent}:</span>
+            <span class="${isError ? 'text-red-400' : 'text-slate-600 dark:text-slate-300'}">${message}</span>
+        </div>
+    `;
+    logStream.appendChild(entry);
+    logStream.scrollTop = logStream.scrollHeight;
+}
+
+// 상태 표시 업데이트
+function setStatus(state, text) {
+    statusTextEl.textContent = text;
+    const colorMap = {
+        'running': { bg: 'bg-amber-500/10', text: 'text-amber-500', dot: 'bg-amber-500', ping: 'bg-amber-400' },
+        'idle': { bg: 'bg-emerald-500/10', text: 'text-emerald-500', dot: 'bg-emerald-500', ping: 'bg-emerald-400' },
+        'offline': { bg: 'bg-red-500/10', text: 'text-red-500', dot: 'bg-red-500', ping: 'bg-red-400' },
+    };
+    const c = colorMap[state] || colorMap['offline'];
+    agentStatus.className = `flex items-center gap-2 px-3 py-1.5 rounded-full ${c.bg} ${c.text} text-xs font-semibold`;
+    statusDot.className = `relative inline-flex rounded-full h-2 w-2 ${c.dot}`;
+    statusPing.className = state === 'running'
+        ? `animate-ping absolute inline-flex h-full w-full rounded-full ${c.ping} opacity-75`
+        : `absolute inline-flex h-full w-full rounded-full ${c.ping} opacity-0`;
+}
+
+// 실행 상태 토글
+function setRunning(running) {
+    isRunning = running;
+    if (running) {
+        executeIcon.textContent = 'stop';
+        executeText.textContent = 'Stop Agent';
+        executeBtn.classList.remove('bg-primary', 'hover:bg-primary/90', 'shadow-primary/20');
+        executeBtn.classList.add('bg-red-500', 'hover:bg-red-600', 'shadow-red-500/20');
+        startRuntime();
+    } else {
+        executeIcon.textContent = 'play_arrow';
+        executeText.textContent = 'Execute Agent Task';
+        executeBtn.classList.remove('bg-red-500', 'hover:bg-red-600', 'shadow-red-500/20');
+        executeBtn.classList.add('bg-primary', 'hover:bg-primary/90', 'shadow-primary/20');
+        stopRuntime();
+    }
+}
+
+// 런타임 타이머
+function startRuntime() {
+    runtimeSeconds = 0;
+    stopRuntime();
+    runtimeInterval = setInterval(() => {
+        runtimeSeconds++;
+        const h = String(Math.floor(runtimeSeconds / 3600)).padStart(2, '0');
+        const m = String(Math.floor((runtimeSeconds % 3600) / 60)).padStart(2, '0');
+        const s = String(runtimeSeconds % 60).padStart(2, '0');
+        runtimeDisplay.textContent = `RUNTIME: ${h}:${m}:${s}`;
+    }, 1000);
+}
+
+function stopRuntime() {
+    if (runtimeInterval) {
+        clearInterval(runtimeInterval);
+        runtimeInterval = null;
+    }
+}
+
+// 실행 버튼 클릭
+executeBtn.addEventListener('click', () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        addLog('System', '서버에 연결되어 있지 않습니다.', null, true);
+        return;
+    }
+
+    if (isRunning) {
+        // 중지
+        ws.send(JSON.stringify({ type: 'stop' }));
+    } else {
+        // 실행
+        const goal = goalInput.value.trim();
+        if (!goal) {
+            addLog('System', 'Goal을 입력하세요.', null, true);
+            goalInput.focus();
+            return;
+        }
+
+        // 로그 초기화
+        logStream.innerHTML = '';
+
+        // 스크린샷 초기화
+        browserScreenshot.classList.add('hidden');
+        browserPlaceholder.classList.remove('hidden');
+        browserUrl.textContent = 'about:blank';
+
+        ws.send(JSON.stringify({
+            type: 'run',
+            goal: goal,
+            start_url: startUrlInput.value.trim() || null,
+            direction: directionInput.value.trim() || null,
+        }));
+    }
+});
+
+// 페이지 로드 시 WebSocket 연결
+connectWS();
+</script>
+</body></html>

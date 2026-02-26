@@ -1,0 +1,25 @@
+# 환경 / 시크릿
+.env
+.env.*
+!.env.example
+
+# 캐시
+__pycache__/
+*.pyc
+.omc/
+
+# 로그 / 스크린샷 (런타임 생성)
+logs/
+screenshots/
+
+# 문서 / 계획
+*.md
+image/
+
+# 테스트
+tests/
+test_*.py
+
+# IDE
+.vscode/
+.idea/

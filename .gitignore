@@ -1,0 +1,25 @@
+# Environment / secrets
+.env
+.config.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Logs & screenshots
+logs/
+screenshots/
+
+# IDE
+.vscode/
+.idea/
+
+# Temp files
+Untitled
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db

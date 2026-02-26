@@ -1,0 +1,11 @@
+services:
+  agentic-browser:
+    build: .
+    ports:
+      - "1234:1234"
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs          # 로그 호스트에서 확인
+      - ./screenshots:/app/screenshots
+    restart: unless-stopped

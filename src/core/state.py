@@ -1,0 +1,343 @@
+"""페이지 상태 추출 모듈 (DOM 기반 + ARIA 보강 하이브리드)
+
+브라우저 DOM에서 직접 상호작용 가능 요소를 추출한다.
+1) 표준 인터랙티브 태그/role 셀렉터
+2) cursor:pointer 감지 (div 클릭 핸들러 등)
+3) ARIA 속성을 활용한 이름·역할 보강
+
+각 요소에 data-aidx 속성을 주입하여 actions.py에서 안정적으로 위치를 찾는다.
+"""
+
+import logging
+from dataclasses import dataclass
+from playwright.async_api import Page
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# JavaScript: 인터랙티브 요소 추출 + data-aidx 주입
+# ---------------------------------------------------------------------------
+_EXTRACT_JS = """() => {
+    // ── Phase 1: 표준 인터랙티브 요소 수집 ──
+    const INTERACTIVE_SELECTOR = [
+        'a[href]', 'button', 'input', 'select', 'textarea', 'summary',
+        '[role="button"]', '[role="tab"]', '[role="checkbox"]', '[role="radio"]',
+        '[role="link"]', '[role="menuitem"]', '[role="option"]', '[role="switch"]',
+        '[role="slider"]', '[role="combobox"]', '[role="searchbox"]',
+        '[role="spinbutton"]', '[role="treeitem"]',
+        '[tabindex]:not([tabindex="-1"])',
+    ].join(', ');
+
+    const interactiveSet = new Set();
+    for (const el of document.querySelectorAll(INTERACTIVE_SELECTOR)) {
+        interactiveSet.add(el);
+    }
+
+    // 가시성 검사 헬퍼
+    function isVisible(el) {
+        if (el.offsetParent === null) {
+            // fixed/sticky는 offsetParent가 null이므로 별도 체크
+            const pos = window.getComputedStyle(el).position;
+            if (pos !== 'fixed' && pos !== 'sticky') return false;
+        }
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    // Phase 1 결과 필터링 (가시 요소만)
+    const phase1 = new Set();
+    for (const el of interactiveSet) {
+        if (isVisible(el)) phase1.add(el);
+    }
+
+    // ── Phase 2: cursor:pointer 요소 수집 (div 클릭 핸들러 등) ──
+    const POINTER_TAGS = 'div, span, li, td, label, img, svg, i, p, h1, h2, h3, h4, h5, h6';
+    const phase2 = new Set();
+
+    for (const el of document.querySelectorAll(POINTER_TAGS)) {
+        if (phase1.has(el)) continue;
+        if (!isVisible(el)) continue;
+
+        const cursor = window.getComputedStyle(el).cursor;
+        if (cursor !== 'pointer') continue;
+
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 10 || rect.height < 10) continue;
+
+        // 내부에 Phase 1 인터랙티브 자식이 있으면 컨테이너이므로 스킵
+        let hasInteractiveChild = false;
+        for (const child of phase1) {
+            if (el !== child && el.contains(child)) {
+                hasInteractiveChild = true;
+                break;
+            }
+        }
+        if (hasInteractiveChild) continue;
+
+        phase2.add(el);
+    }
+
+    // ── Phase 3: 합산 + 컨테이너 중복 제거 ──
+    const merged = new Set([...phase1, ...phase2]);
+
+    // 요소 A가 B를 포함하고, A에 명시적 role이 없으면 A 제거 (더 구체적인 자식 유지)
+    const toRemove = new Set();
+    for (const a of merged) {
+        for (const b of merged) {
+            if (a === b) continue;
+            if (a.contains(b) && !a.getAttribute('role')) {
+                toRemove.add(a);
+                break;
+            }
+        }
+    }
+    for (const el of toRemove) merged.delete(el);
+
+    // ── Phase 4: DOM 순서 정렬 ──
+    const sorted = [...merged].sort((a, b) =>
+        a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
+    );
+
+    // ── Phase 5: 요소 정보 추출 ──
+    // 태그 → 기본 role 매핑
+    function inferRole(el) {
+        const explicit = el.getAttribute('role');
+        if (explicit) return explicit;
+
+        const tag = el.tagName.toLowerCase();
+        if (tag === 'a') return 'link';
+        if (tag === 'button') return 'button';
+        if (tag === 'select') return 'combobox';
+        if (tag === 'textarea') return 'textbox';
+        if (tag === 'summary') return 'button';
+        if (tag === 'input') {
+            const type = (el.type || 'text').toLowerCase();
+            if (type === 'checkbox') return 'checkbox';
+            if (type === 'radio') return 'radio';
+            if (type === 'submit' || type === 'button' || type === 'reset') return 'button';
+            if (type === 'range') return 'slider';
+            if (type === 'number') return 'spinbutton';
+            if (type === 'search') return 'searchbox';
+            return 'textbox';
+        }
+        // cursor:pointer div/span 등 → generic 'button'
+        if (window.getComputedStyle(el).cursor === 'pointer') return 'button';
+        return 'generic';
+    }
+
+    // 이름 추출 (우선순위)
+    function extractName(el) {
+        // 1. aria-label
+        const ariaLabel = el.getAttribute('aria-label');
+        if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim().substring(0, 80);
+
+        // 2. aria-labelledby
+        const labelledBy = el.getAttribute('aria-labelledby');
+        if (labelledBy) {
+            const parts = [];
+            for (const id of labelledBy.split(/\s+/)) {
+                const ref = document.getElementById(id);
+                if (ref) parts.push(ref.textContent.trim());
+            }
+            const joined = parts.join(' ').trim();
+            if (joined) return joined.substring(0, 80);
+        }
+
+        // 3. <label for="id">
+        if (el.id) {
+            const label = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+            if (label) {
+                const lt = label.textContent.trim();
+                if (lt) return lt.substring(0, 80);
+            }
+        }
+
+        // 4. 직접 자식 텍스트 노드만 (중첩 컴포넌트 텍스트 방지)
+        const tag = el.tagName.toLowerCase();
+        if (tag === 'a' || tag === 'button' || tag === 'summary') {
+            const directText = [];
+            for (const node of el.childNodes) {
+                if (node.nodeType === Node.TEXT_NODE) {
+                    const t = node.textContent.trim();
+                    if (t) directText.push(t);
+                }
+            }
+            const joined = directText.join(' ').trim();
+            if (joined) return joined.substring(0, 80);
+        }
+
+        // 5. innerText (전체, 잘라서)
+        const inner = (el.innerText || '').trim();
+        if (inner) return inner.substring(0, 80);
+
+        // 6. placeholder / title / alt / value
+        for (const attr of ['placeholder', 'title', 'alt', 'value']) {
+            const v = el.getAttribute(attr);
+            if (v && v.trim()) return v.trim().substring(0, 80);
+        }
+
+        // 7. 폴백: (tag.className)
+        const cls = (el.className && typeof el.className === 'string')
+            ? el.className.split(' ')[0] || 'unknown'
+            : 'unknown';
+        return '(' + tag + '.' + cls + ')';
+    }
+
+    // ── Phase 6 & 7: data-aidx 주입 + 결과 배열 생성 ──
+    const results = [];
+    let index = 1;
+
+    for (const el of sorted) {
+        el.setAttribute('data-aidx', String(index));
+
+        const tag = el.tagName.toLowerCase();
+        const role = inferRole(el);
+        const name = extractName(el);
+
+        const info = { index, tag, role, name };
+
+        // value (input/textarea/select)
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+            info.value = el.value || '';
+        }
+
+        // checked (checkbox/radio)
+        if (el.type === 'checkbox' || el.type === 'radio' ||
+            role === 'checkbox' || role === 'radio' || role === 'switch') {
+            info.checked = !!el.checked;
+        } else {
+            info.checked = null;
+        }
+
+        // disabled
+        info.disabled = el.disabled === true ||
+                        el.getAttribute('aria-disabled') === 'true';
+
+        results.push(info);
+        index++;
+    }
+
+    return results;
+}"""
+
+# ---------------------------------------------------------------------------
+# JavaScript: 페이지 텍스트 요약 추출
+# ---------------------------------------------------------------------------
+_PAGE_TEXT_JS = """() => {
+    const raw = (document.body.innerText || '').trim();
+    // 연속 공백/줄바꿈을 하나로 축소
+    const collapsed = raw.replace(/[\\s\\n]+/g, ' ');
+    return collapsed.substring(0, 2000);
+}"""
+
+
+# ---------------------------------------------------------------------------
+# 데이터 클래스
+# ---------------------------------------------------------------------------
+@dataclass
+class IndexedElement:
+    """인덱싱된 페이지 요소"""
+
+    index: int
+    role: str
+    name: str
+    tag: str = ""  # HTML 태그명 (e.g. "button", "div", "a")
+    nth: int = 0  # 하위 호환성 유지 (현재 미사용, 항상 0)
+    value: str = ""
+    description: str = ""
+    checked: bool | None = None
+    disabled: bool = False
+    selector: str = ""  # '[data-aidx="N"]' CSS 셀렉터
+
+    def to_display(self) -> str:
+        """LLM에게 보여줄 한 줄 텍스트"""
+        parts = [f'[{self.index}] {self.role} <{self.tag}>: "{self.name}"']
+        if self.value:
+            parts.append(f'(value: "{self.value}")')
+        if self.checked is not None:
+            parts.append(f"(checked: {self.checked})")
+        if self.disabled:
+            parts.append("(disabled)")
+        return " ".join(parts)
+
+
+@dataclass
+class PageState:
+    """현재 페이지 상태"""
+
+    url: str
+    title: str
+    elements: list[IndexedElement]
+    page_text: str = ""  # 페이지 가시 텍스트 요약 (최대 2000자)
+
+    def to_prompt_text(self) -> str:
+        """LLM 프롬프트에 삽입할 전체 상태 텍스트"""
+        if not self.elements:
+            return f"URL: {self.url}\n제목: {self.title}\n\n(상호작용 가능한 요소 없음)"
+
+        elements_text = "\n".join(e.to_display() for e in self.elements)
+        text = (
+            f"URL: {self.url}\n"
+            f"제목: {self.title}\n"
+            f"상호작용 가능 요소 ({len(self.elements)}개):\n"
+            f"{elements_text}"
+        )
+
+        if self.page_text:
+            text += f"\n\n페이지 텍스트 (요약):\n{self.page_text}"
+
+        return text
+
+    def find_by_index(self, index: int) -> IndexedElement | None:
+        """인덱스로 요소 검색"""
+        for e in self.elements:
+            if e.index == index:
+                return e
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 메인 추출 함수
+# ---------------------------------------------------------------------------
+async def get_indexed_state(page: Page) -> PageState:
+    """페이지에서 상호작용 가능 요소를 DOM 기반으로 추출 → 인덱스 부여
+
+    1) 표준 인터랙티브 요소 (a, button, input 등 + ARIA role)
+    2) cursor:pointer 요소 (div 클릭 핸들러 등)
+    3) data-aidx 속성 주입으로 안정적 요소 위치 확보
+    """
+    try:
+        raw_elements = await page.evaluate(_EXTRACT_JS)
+    except Exception as e:
+        logger.warning(f"DOM 요소 추출 실패: {e}")
+        raw_elements = []
+
+    try:
+        page_text = await page.evaluate(_PAGE_TEXT_JS)
+    except Exception:
+        page_text = ""
+
+    elements = []
+    for item in raw_elements:
+        elements.append(
+            IndexedElement(
+                index=item["index"],
+                role=item["role"],
+                name=item["name"],
+                tag=item.get("tag", ""),
+                value=item.get("value", ""),
+                checked=item.get("checked"),
+                disabled=item.get("disabled", False),
+                selector=f'[data-aidx="{item["index"]}"]',
+            )
+        )
+
+    logger.info(f"DOM 추출 완료: {len(elements)}개 요소")
+
+    return PageState(
+        url=page.url,
+        title=await page.title(),
+        elements=elements,
+        page_text=page_text,
+    )
