@@ -1316,9 +1316,26 @@ agentic_crawler/
 
 
 **Accessibility Tree 추출 검토**
-- 기존 코드에서 이름 추출, 포함해야할 요소 누락, description필드 미사용용 등의 문제
-- playwright의 ariaSnapshop()을 도입하여 브라우저의 실제 Accessibility Tree를 YAML 형태로 반환받도록 시도
 
+**초기 접근 (aria_snapshot 방식)**
+- Playwright의 `page.accessibility.snapshot()` 사용 시도
+- 문제점: subwayyy.kr에서 **단 5개 요소**만 추출되는 문제 발생
+- 대부분의 인터랙티브 요소가 누락됨 (한국 사이트들이 ARIA 속성을 제대로 구현하지 않음)
+- 특히 `div`에 클릭 핸들러만 붙인 경우 접근성 트리에 나타나지 않음
+
+**해결책 (DOM 기반 + cursor:pointer 하이브리드)**
+- `state.py`를 전면 재작성하여 DOM 기반 추출로 변경
+- 표준 인터랙티브 요소 (button, a, input 등) + ARIA role 요소 수집
+- **cursor:pointer** 스타일이 있는 div도 추가 수집 (클릭 핸들러가 있는 요소 감지)
+- 각 요소에 `data-aidx` 속성 주입하여 안정적 참조 가능
+- 결과: subwayyy.kr에서 **97개 요소** 추출 (19배 개선)
+
+**구현 세부사항**
+- JavaScript를 통해 브라우저에서 직접 실행 (`page.evaluate()`)
+- 가시성 필터링: `offsetParent === null`, `display:none`, `visibility:hidden` 제외
+- DOM 순서 정렬: `compareDocumentPosition` 기준
+- 요소 이름 추출 우선순위: aria-label → label태그 → 직접 텍스트 → innerText → placeholder/title/alt
+- 역할 추론: 명시적 role 속성 → 태그 기반 추론 → cursor:pointer div는 'button'으로 처리
 
 
 ### Phase 1-B: 에이전트 분리 (2~3주)
