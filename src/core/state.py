@@ -219,18 +219,79 @@ _EXTRACT_JS = """() => {
         return '(' + tag + '.' + cls + ')';
     }
 
-    // ── Phase 6 & 7: data-aidx 주입 + 결과 배열 생성 ──
+    // ── Phase 6: Viewport 필터링 ──
+    // 현재 화면에 보이는 요소만 추출하여 LLM 입력 토큰을 절감한다.
+    // 스크롤 후 매 스텝마다 재추출하므로 뷰포트 밖 요소는 스크롤 시 자연히 포함됨.
+    function inViewport(el) {
+        const rect = el.getBoundingClientRect();
+        const winH = window.innerHeight || document.documentElement.clientHeight;
+        const winW = window.innerWidth || document.documentElement.clientWidth;
+        const margin = 50; // 경계에 걸친 요소 보호
+        return (
+            rect.bottom >= -margin &&
+            rect.right >= -margin &&
+            rect.top <= winH + margin &&
+            rect.left <= winW + margin &&
+            rect.width > 0 &&
+            rect.height > 0
+        );
+    }
+
+    // ── Phase 6-B: Layer 태깅 (휴리스틱 기반) ──
+    // 팝업/오버레이 요소를 식별하여 LLM에 맥락 힌트를 제공한다.
+    // z-index는 CSS Stacking Context 때문에 정확한 계산이 불가하므로,
+    // dialog/aria-modal + position:fixed 휴리스틱으로 판정한다.
+    function getLayerContext(el) {
+        let parent = el;
+        while (parent && parent !== document.body && parent !== document.documentElement) {
+            const tag = parent.tagName.toLowerCase();
+            const role = parent.getAttribute('role');
+
+            // 1. 명시적 다이얼로그/모달
+            if (tag === 'dialog' || role === 'dialog' || role === 'alertdialog'
+                || parent.getAttribute('aria-modal') === 'true') {
+                return 'popup';
+            }
+
+            // 2. position:fixed + z-index >= 10 → 오버레이 (헤더/플로팅 버튼 등)
+            const style = window.getComputedStyle(parent);
+            if (style.position === 'fixed') {
+                const z = parseInt(style.zIndex);
+                if (!isNaN(z) && z >= 10) {
+                    return 'overlay';
+                }
+            }
+
+            parent = parent.parentElement;
+        }
+        return 'main';
+    }
+
+    // ── Phase 7: data-aidx 주입 + 결과 배열 생성 ──
     const results = [];
     let index = 1;
 
     for (const el of sorted) {
-        el.setAttribute('data-aidx', String(index));
+        // 뷰포트 밖 요소는 건너뜀
+        if (!inViewport(el)) continue;
 
         const tag = el.tagName.toLowerCase();
         const role = inferRole(el);
         const name = extractName(el);
 
-        const info = { index, tag, role, name };
+        // 미명명 요소 제거: "(tag.class)" 폴백 이름 + 네이티브 인터랙티브 아님 + generic role
+        // → LLM에 가치 없는 노이즈이므로 제거
+        const isFallbackName = name.startsWith('(') && name.endsWith(')');
+        const isNative = ['button', 'input', 'select', 'textarea', 'a', 'summary'].includes(tag);
+        if (isFallbackName && !isNative && role === 'generic') {
+            continue;
+        }
+
+        // 필터 통과 후 인덱스 부여 (연속적 번호 유지)
+        el.setAttribute('data-aidx', String(index));
+
+        const layer = getLayerContext(el);
+        const info = { index, tag, role, name, layer };
 
         // value (input/textarea/select)
         if (tag === 'input' || tag === 'textarea' || tag === 'select') {
@@ -330,6 +391,7 @@ class IndexedElement:
     role: str
     name: str
     tag: str = ""  # HTML 태그명 (e.g. "button", "div", "a")
+    layer: str = "main"  # 레이어: "main" | "overlay" | "popup"
     nth: int = 0  # 하위 호환성 유지 (현재 미사용, 항상 0)
     value: str = ""
     description: str = ""
@@ -339,7 +401,15 @@ class IndexedElement:
 
     def to_display(self) -> str:
         """LLM에게 보여줄 한 줄 텍스트"""
-        parts = [f'[{self.index}] {self.role} <{self.tag}>: "{self.name}"']
+        # 본문(main) 요소는 레이어 태그 생략 (토큰 절약)
+        # 오버레이/팝업만 명시하여 LLM에 맥락 힌트 제공
+        layer_tag = ""
+        if self.layer == "popup":
+            layer_tag = "[팝업] "
+        elif self.layer == "overlay":
+            layer_tag = "[오버레이] "
+
+        parts = [f'[{self.index}] {layer_tag}{self.role} <{self.tag}>: "{self.name}"']
         if self.value:
             parts.append(f'(value: "{self.value}")')
         if self.checked is not None:
@@ -413,6 +483,7 @@ async def get_indexed_state(page: Page) -> PageState:
                 role=item["role"],
                 name=item["name"],
                 tag=item.get("tag", ""),
+                layer=item.get("layer", "main"),
                 value=item.get("value", ""),
                 checked=item.get("checked"),
                 disabled=item.get("disabled", False),

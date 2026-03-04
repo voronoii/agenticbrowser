@@ -108,6 +108,12 @@ async def run_agent_loop(
         try:
             # 1. Observation: 페이지 상태 추출
             state = await get_indexed_state(page)
+            
+
+            logger.info(state.elements)
+            logger.info("--------------------------------")
+            logger.info(state.page_text)
+            logger.info("--------------------------------")
             element_count = len(state.elements)
             logger.info(
                 f"Step {step_num}: {state.url} "
