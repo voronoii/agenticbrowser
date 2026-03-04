@@ -270,9 +270,24 @@ function handleMessage(msg) {
         case 'status':
             if (msg.status === 'running') {
                 setStatus('running', 'Agent Running');
+                // waiting 상태에서 복귀 시 버튼 정리
+                executeBtn.disabled = false;
+                executeBtn.classList.remove('bg-blue-500', 'hover:bg-blue-500', 'shadow-blue-500/20', 'opacity-70', 'cursor-not-allowed');
                 setRunning(true);
+                hideHumanInput();
+            } else if (msg.status === 'waiting') {
+                setStatus('waiting', msg.message || 'Waiting for input');
+                // 버튼을 "대기 중"으로 변경, 비활성화
+                executeIcon.textContent = 'hourglass_top';
+                executeText.textContent = '사용자 답변 대기 중...';
+                executeBtn.classList.remove('bg-red-500', 'hover:bg-red-600', 'shadow-red-500/20');
+                executeBtn.classList.add('bg-blue-500', 'hover:bg-blue-500', 'shadow-blue-500/20', 'opacity-70', 'cursor-not-allowed');
+                executeBtn.disabled = true;
             } else if (msg.status === 'idle') {
                 setStatus('idle', 'Agent Online');
+                executeBtn.disabled = false;
+                executeBtn.classList.remove('bg-blue-500', 'hover:bg-blue-500', 'shadow-blue-500/20', 'opacity-70', 'cursor-not-allowed');
+                hideHumanInput();
                 setRunning(false);
             } else if (msg.status === 'stopped' || msg.status === 'cancelled') {
                 setStatus('idle', 'Agent Online');
@@ -306,6 +321,11 @@ function handleMessage(msg) {
             setStatus('idle', 'Agent Online');
             break;
 
+        case 'ask_human':
+            addLog('System', `🙋 에이전트 질문: ${msg.question}`);
+            showHumanInput(msg.question);
+            break;
+
         case 'error':
             addLog('System', `오류: ${msg.message}`, null, true);
             break;
@@ -336,13 +356,14 @@ function setStatus(state, text) {
     statusTextEl.textContent = text;
     const colorMap = {
         'running': { bg: 'bg-amber-500/10', text: 'text-amber-500', dot: 'bg-amber-500', ping: 'bg-amber-400' },
+        'waiting': { bg: 'bg-blue-500/10', text: 'text-blue-500', dot: 'bg-blue-500', ping: 'bg-blue-400' },
         'idle': { bg: 'bg-emerald-500/10', text: 'text-emerald-500', dot: 'bg-emerald-500', ping: 'bg-emerald-400' },
         'offline': { bg: 'bg-red-500/10', text: 'text-red-500', dot: 'bg-red-500', ping: 'bg-red-400' },
     };
     const c = colorMap[state] || colorMap['offline'];
     agentStatus.className = `flex items-center gap-2 px-3 py-1.5 rounded-full ${c.bg} ${c.text} text-xs font-semibold`;
     statusDot.className = `relative inline-flex rounded-full h-2 w-2 ${c.dot}`;
-    statusPing.className = state === 'running'
+    statusPing.className = (state === 'running' || state === 'waiting')
         ? `animate-ping absolute inline-flex h-full w-full rounded-full ${c.ping} opacity-75`
         : `absolute inline-flex h-full w-full rounded-full ${c.ping} opacity-0`;
 }
@@ -420,6 +441,59 @@ executeBtn.addEventListener('click', () => {
         }));
     }
 });
+
+// === ask_human 입력 UI ===
+function showHumanInput(question) {
+    // 이미 표시 중이면 제거
+    hideHumanInput();
+
+    const container = document.createElement('div');
+    container.id = 'human-input-container';
+    container.className = 'flex flex-col gap-2 p-3 mx-4 mb-2 rounded-lg border-2 border-blue-500/50 bg-blue-500/5';
+    container.innerHTML = `
+        <div class="flex items-center gap-2">
+            <span class="material-symbols-outlined text-blue-500 text-sm">help</span>
+            <span class="text-sm font-semibold text-blue-500">에이전트가 질문합니다</span>
+        </div>
+        <p class="text-sm text-slate-700 dark:text-slate-300">${question}</p>
+        <div class="flex gap-2">
+            <input id="human-response-input" type="text" class="flex-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-2 text-sm focus:ring-1 focus:ring-blue-500 focus:border-blue-500 outline-none" placeholder="답변을 입력하세요..." autofocus />
+            <button id="human-response-btn" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-semibold transition-colors">전송</button>
+        </div>
+    `;
+
+    logStream.appendChild(container);
+    logStream.scrollTop = logStream.scrollHeight;
+
+    const input = document.getElementById('human-response-input');
+    const btn = document.getElementById('human-response-btn');
+
+    function sendResponse() {
+        const response = input.value.trim();
+        if (!response) return;
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+        ws.send(JSON.stringify({
+            type: 'human_response',
+            response: response,
+        }));
+
+        addLog('System', `✏️ 사용자 응답: ${response}`);
+        hideHumanInput();
+    }
+
+    btn.addEventListener('click', sendResponse);
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') sendResponse();
+    });
+
+    input.focus();
+}
+
+function hideHumanInput() {
+    const container = document.getElementById('human-input-container');
+    if (container) container.remove();
+}
 
 // 페이지 로드 시 WebSocket 연결
 connectWS();

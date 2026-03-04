@@ -27,6 +27,9 @@ SCREENSHOT_DIR = PROJECT_ROOT / "screenshots"
 MAX_STEPS = int(os.getenv("MAX_STEPS", "50"))
 MAX_FAILURES = int(os.getenv("MAX_FAILURES", "5"))
 
+# 페이지 콘텐츠 추출 설정
+A11Y_TEXT_LIMIT = int(os.getenv("A11Y_TEXT_LIMIT", "4000"))  # Accessibility Tree 텍스트 최대 문자 수
+
 # 서버 설정
 SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "1234"))

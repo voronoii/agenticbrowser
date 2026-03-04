@@ -12,6 +12,8 @@ import logging
 from dataclasses import dataclass
 from playwright.async_api import Page
 
+from src.config import A11Y_TEXT_LIMIT
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,10 +38,12 @@ _EXTRACT_JS = """() => {
 
     // 가시성 검사 헬퍼
     function isVisible(el) {
+        const style = window.getComputedStyle(el);
+        // visibility: hidden / opacity: 0 체크
+        if (style.visibility === 'hidden' || style.opacity === '0') return false;
         if (el.offsetParent === null) {
             // fixed/sticky는 offsetParent가 null이므로 별도 체크
-            const pos = window.getComputedStyle(el).position;
-            if (pos !== 'fixed' && pos !== 'sticky') return false;
+            if (style.position !== 'fixed' && style.position !== 'sticky') return false;
         }
         const rect = el.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
@@ -126,9 +130,11 @@ _EXTRACT_JS = """() => {
         return 'generic';
     }
 
-    // 이름 추출 (우선순위)
+    // 이름 추출 (우선순위 — W3C Accessible Name 계산 기반)
     function extractName(el) {
-        // 1. aria-label
+        const tag = el.tagName.toLowerCase();
+
+        // 1. aria-label (최우선: 개발자가 명시적으로 지정한 접근성 이름)
         const ariaLabel = el.getAttribute('aria-label');
         if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim().substring(0, 80);
 
@@ -154,7 +160,6 @@ _EXTRACT_JS = """() => {
         }
 
         // 4. 직접 자식 텍스트 노드만 (중첩 컴포넌트 텍스트 방지)
-        const tag = el.tagName.toLowerCase();
         if (tag === 'a' || tag === 'button' || tag === 'summary') {
             const directText = [];
             for (const node of el.childNodes) {
@@ -167,17 +172,40 @@ _EXTRACT_JS = """() => {
             if (joined) return joined.substring(0, 80);
         }
 
-        // 5. innerText (전체, 잘라서)
+        // 5. 자식 요소의 접근성 이름 (아이콘 전용 버튼 대응)
+        //    <img alt>, <svg aria-label>, <svg><title>, <i aria-label>
+        const childImg = el.querySelector(':scope > img[alt], :scope > svg img[alt]');
+        if (childImg) {
+            const alt = childImg.getAttribute('alt').trim();
+            if (alt) return alt.substring(0, 80);
+        }
+        const childSvg = el.querySelector(':scope > svg[aria-label]');
+        if (childSvg) {
+            const svgLabel = childSvg.getAttribute('aria-label').trim();
+            if (svgLabel) return svgLabel.substring(0, 80);
+        }
+        const svgTitle = el.querySelector(':scope > svg > title');
+        if (svgTitle) {
+            const st = svgTitle.textContent.trim();
+            if (st) return st.substring(0, 80);
+        }
+        const childIcon = el.querySelector(':scope > i[aria-label], :scope > span[aria-label]');
+        if (childIcon) {
+            const iconLabel = childIcon.getAttribute('aria-label').trim();
+            if (iconLabel) return iconLabel.substring(0, 80);
+        }
+
+        // 6. innerText (전체, 잘라서)
         const inner = (el.innerText || '').trim();
         if (inner) return inner.substring(0, 80);
 
-        // 6. placeholder / title / alt / value
-        for (const attr of ['placeholder', 'title', 'alt', 'value']) {
+        // 7. title / placeholder / alt / value (최후 수단 — W3C 스펙 준수)
+        for (const attr of ['title', 'placeholder', 'alt', 'value']) {
             const v = el.getAttribute(attr);
             if (v && v.trim()) return v.trim().substring(0, 80);
         }
 
-        // 7. 폴백: (tag.className)
+        // 8. 폴백: (tag.className)
         const cls = (el.className && typeof el.className === 'string')
             ? el.className.split(' ')[0] || 'unknown'
             : 'unknown';
@@ -233,6 +261,58 @@ _PAGE_TEXT_JS = """() => {
 
 
 # ---------------------------------------------------------------------------
+# Accessibility Tree 추출 함수
+# ---------------------------------------------------------------------------
+def _truncate_yaml(yaml_text: str, max_chars: int) -> str:
+    """YAML 텍스트를 줄 단위로 안전하게 잘라냄"""
+    if len(yaml_text) <= max_chars:
+        return yaml_text
+    lines = yaml_text.split('\n')
+    result = []
+    current_len = 0
+    for line in lines:
+        if current_len + len(line) + 1 > max_chars:
+            break
+        result.append(line)
+        current_len += len(line) + 1
+    result.append("  ... (truncated)")
+    return '\n'.join(result)
+
+
+async def _get_aria_snapshot(page: Page, max_chars: int) -> str:
+    """Accessibility Tree YAML 스냅샷 추출
+
+    1차: main/article 영역만 추출 (본문 집중)
+    2차: body 전체 추출 (main이 없는 페이지)
+    3차: 기존 innerText 폴백
+    """
+    # 1차: main 영역 우선
+    for selector in ['main', '[role="main"]', 'article']:
+        try:
+            locator = page.locator(selector).first
+            if await locator.count() > 0:
+                snapshot = await locator.aria_snapshot()
+                if snapshot and len(snapshot.strip()) > 50:
+                    return _truncate_yaml(snapshot, max_chars)
+        except Exception:
+            continue
+
+    # 2차: body 전체
+    try:
+        snapshot = await page.locator('body').aria_snapshot()
+        if snapshot:
+            return _truncate_yaml(snapshot, max_chars)
+    except Exception:
+        pass
+
+    # 3차: 기존 innerText 폴백
+    try:
+        return await page.evaluate(_PAGE_TEXT_JS)
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # 데이터 클래스
 # ---------------------------------------------------------------------------
 @dataclass
@@ -285,7 +365,7 @@ class PageState:
         )
 
         if self.page_text:
-            text += f"\n\n페이지 텍스트 (요약):\n{self.page_text}"
+            text += f"\n\n페이지 콘텐츠 (Accessibility Tree):\n{self.page_text}"
 
         return text
 
@@ -314,7 +394,7 @@ async def get_indexed_state(page: Page) -> PageState:
         raw_elements = []
 
     try:
-        page_text = await page.evaluate(_PAGE_TEXT_JS)
+        page_text = await _get_aria_snapshot(page, A11Y_TEXT_LIMIT)
     except Exception:
         page_text = ""
 

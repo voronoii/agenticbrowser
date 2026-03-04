@@ -54,6 +54,9 @@ active_connections: list[WebSocket] = []
 # 현재 실행 중인 에이전트 태스크
 current_task: asyncio.Task | None = None
 
+# ask_human 응답 대기용 Future
+pending_human_future: asyncio.Future | None = None
+
 
 async def broadcast(message: dict) -> None:
     """모든 WebSocket 클라이언트에 메시지 브로드캐스트"""
@@ -113,6 +116,16 @@ async def websocket_endpoint(ws: WebSocket):
                     run_agent_task(goal, direction, start_url)
                 )
 
+            elif msg_type == "human_response":
+                # 사용자 응답 수신 → 대기 중인 Future 해제
+                global pending_human_future
+                response_text = message.get("response", "")
+                if pending_human_future and not pending_human_future.done():
+                    pending_human_future.set_result(response_text)
+                    logger.info(f"사용자 응답 전달: {response_text[:100]}")
+                else:
+                    logger.warning("대기 중인 ask_human 요청이 없습니다.")
+
             elif msg_type == "stop":
                 # 에이전트 중지 요청
                 if current_task and not current_task.done():
@@ -169,6 +182,29 @@ async def run_agent_task(
                 "screenshot": step_log.screenshot_b64,
             })
 
+        # ask_human 콜백: 질문을 UI로 전송하고 사용자 응답 대기
+        async def on_ask_human(question: str) -> str:
+            global pending_human_future
+            pending_human_future = asyncio.get_event_loop().create_future()
+            await broadcast({
+                "type": "ask_human",
+                "question": question,
+            })
+            await broadcast({
+                "type": "status",
+                "status": "waiting",
+                "message": f"사용자 응답 대기 중: {question[:50]}",
+            })
+            # 사용자가 응답할 때까지 대기
+            response = await pending_human_future
+            pending_human_future = None
+            await broadcast({
+                "type": "status",
+                "status": "running",
+                "message": "에이전트 재개",
+            })
+            return response
+
         # 에이전트 루프 실행
         result = await run_agent_loop(
             browser=browser,
@@ -177,6 +213,7 @@ async def run_agent_task(
             direction=direction,
             start_url=start_url,
             on_step=on_step,
+            on_ask_human=on_ask_human,
         )
 
         # 완료 알림

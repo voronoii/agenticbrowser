@@ -39,6 +39,7 @@ class AgentAction:
     result: Any = None
     question: str | None = None
     reason: str = ""
+    memo: str | None = None  # 선택적 메모: 현재 페이지에서 수집한 핵심 정보
     extra: dict = field(default_factory=dict)
 
 
@@ -129,10 +130,11 @@ def parse_action(llm_response: str) -> AgentAction:
         result=data.get("result"),
         question=data.get("question"),
         reason=data.get("reason", ""),
+        memo=data.get("memo"),
         extra={k: v for k, v in data.items()
                if k not in ("action", "index", "text", "url", "combo",
                             "option", "direction", "amount", "result",
-                            "question", "reason")},
+                            "question", "reason", "memo")},
     )
 
 

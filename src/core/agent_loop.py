@@ -42,10 +42,15 @@ class AgentResult:
     data: Any = None
     total_steps: int = 0
     failure_count: int = 0
+    collected_info: list[str] = field(default_factory=list)  # 수집된 메모 이력
 
 
 # 콜백 타입: UI로 스텝 로그를 실시간 전송할 때 사용
 StepCallback = Callable[[StepLog], Awaitable[None]]
+
+# 콜백 타입: ask_human 액션 시 사용자 응답을 받아오는 콜백
+# 질문 문자열을 받아 사용자 응답 문자열을 반환
+AskHumanCallback = Callable[[str], Awaitable[str]]
 
 
 async def run_agent_loop(
@@ -57,6 +62,7 @@ async def run_agent_loop(
     max_steps: int = MAX_STEPS,
     max_failures: int = MAX_FAILURES,
     on_step: StepCallback | None = None,
+    on_ask_human: AskHumanCallback | None = None,
 ) -> AgentResult:
     """에이전트 핵심 루프 실행
 
@@ -69,6 +75,7 @@ async def run_agent_loop(
         max_steps: 최대 스텝 수
         max_failures: 최대 연속 실패 허용 수
         on_step: 스텝 완료 시 호출되는 콜백 (UI 업데이트용)
+        on_ask_human: ask_human 액션 시 사용자 응답을 받아오는 콜백 (없으면 루프 종료)
 
     Returns:
         AgentResult: 실행 결과
@@ -76,6 +83,7 @@ async def run_agent_loop(
     page = browser.page
     steps: list[StepLog] = []
     step_history: list[str] = []
+    collected_info: list[str] = []  # 에이전트 작업 메모리 (memo 필드 누적)
     failure_count = 0
 
     # ── Stuck 감지용 변수 ──
@@ -133,6 +141,7 @@ async def run_agent_loop(
                         steps=steps,
                         total_steps=step_num,
                         failure_count=failure_count,
+                        collected_info=collected_info,
                     )
 
             prev_url = state.url
@@ -146,6 +155,7 @@ async def run_agent_loop(
                 direction_hint=direction,
                 step_history=step_history,
                 is_stuck=is_stuck,
+                collected_info=collected_info,
             )
 
             # 3. 액션 파싱
@@ -181,6 +191,11 @@ async def run_agent_loop(
 
             step_history.append(f"Step {step_num}: {action.action} → {result.message}")
 
+            # memo 필드가 있으면 작업 메모리에 누적
+            if action.memo:
+                collected_info.append(action.memo)
+                logger.info(f"Step {step_num} memo 저장: {action.memo[:80]}")
+
             # 콜백 호출 (UI 업데이트)
             if on_step:
                 await on_step(step_log)
@@ -195,18 +210,34 @@ async def run_agent_loop(
                     data=result.data,
                     total_steps=step_num,
                     failure_count=failure_count,
+                    collected_info=collected_info,
                 )
 
             if action.action == "ask_human":
-                logger.info(f"사용자 개입 요청: {result.data}")
-                return AgentResult(
-                    success=True,
-                    message=f"사용자 개입 필요: {result.data}",
-                    steps=steps,
-                    data=result.data,
-                    total_steps=step_num,
-                    failure_count=failure_count,
-                )
+                question = str(result.data)
+                logger.info(f"사용자 개입 요청: {question}")
+
+                if on_ask_human:
+                    # 콜백으로 사용자 응답 대기 → 응답 받으면 루프 계속
+                    human_response = await on_ask_human(question)
+                    logger.info(f"사용자 응답 수신: {human_response}")
+                    step_history.append(
+                        f"Step {step_num}: ask_human → 사용자 응답: {human_response}"
+                    )
+                    collected_info.append(f"사용자 지시: {human_response}")
+                    await asyncio.sleep(0.5)
+                    continue
+                else:
+                    # 콜백 없으면 기존 동작: 루프 종료
+                    return AgentResult(
+                        success=True,
+                        message=f"사용자 개입 필요: {question}",
+                        steps=steps,
+                        data=result.data,
+                        total_steps=step_num,
+                        failure_count=failure_count,
+                        collected_info=collected_info,
+                    )
 
             # 6. 실패 처리
             if not result.success:
@@ -222,6 +253,7 @@ async def run_agent_loop(
                         steps=steps,
                         total_steps=step_num,
                         failure_count=failure_count,
+                        collected_info=collected_info,
                     )
             else:
                 failure_count = 0  # 성공 시 카운터 리셋
@@ -253,6 +285,7 @@ async def run_agent_loop(
                     steps=steps,
                     total_steps=step_num,
                     failure_count=failure_count,
+                    collected_info=collected_info,
                 )
 
     # 최대 스텝 도달
@@ -262,4 +295,5 @@ async def run_agent_loop(
         steps=steps,
         total_steps=max_steps,
         failure_count=failure_count,
+        collected_info=collected_info,
     )
