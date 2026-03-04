@@ -85,14 +85,21 @@ _EXTRACT_JS = """() => {
     // ── Phase 3: 합산 + 컨테이너 중복 제거 ──
     const merged = new Set([...phase1, ...phase2]);
 
-    // 요소 A가 B를 포함하고, A에 명시적 role이 없으면 A 제거 (더 구체적인 자식 유지)
+    // 요소 A가 B를 포함할 때, A가 의미 없는 컨테이너면 제거 (더 구체적인 자식 유지)
+    // 단, 네이티브 인터랙티브 요소(button, a 등)는 절대 제거하지 않음
     const toRemove = new Set();
+    const NATIVE_INTERACTIVE = ['button', 'a', 'input', 'select', 'textarea', 'summary'];
+
     for (const a of merged) {
         for (const b of merged) {
             if (a === b) continue;
-            if (a.contains(b) && !a.getAttribute('role')) {
-                toRemove.add(a);
-                break;
+            if (a.contains(b)) {
+                const tagA = a.tagName.toLowerCase();
+                // 네이티브 인터랙티브 요소이거나 명시적 role이 있으면 제거하지 않음
+                if (!NATIVE_INTERACTIVE.includes(tagA) && !a.getAttribute('role')) {
+                    toRemove.add(a);
+                    break;
+                }
             }
         }
     }
