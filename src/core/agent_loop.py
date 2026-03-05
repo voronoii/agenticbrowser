@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class StepLog:
     """단일 스텝 로그"""
+
     step: int
     timestamp: str
     url: str
@@ -36,6 +37,7 @@ class StepLog:
 @dataclass
 class AgentResult:
     """에이전트 실행 최종 결과"""
+
     success: bool
     message: str
     steps: list[StepLog] = field(default_factory=list)
@@ -87,20 +89,34 @@ async def run_agent_loop(
     failure_count = 0
 
     # ── Stuck 감지용 변수 ──
-    STUCK_THRESHOLD = 3       # 동일 패턴 반복 N회 → stuck 경고
+    STUCK_THRESHOLD = 3  # 동일 패턴 반복 N회 → stuck 경고
     STUCK_ABORT_THRESHOLD = 6  # N회 이상 → 자동 종료
     recent_actions: list[str] = []  # 최근 액션 시그니처
     prev_url = ""
     prev_element_count = -1
+
+    # ── Post-action 상태 핑거프린트 (변경 감지용) ──
+    prev_fingerprint: dict | None = None
+    no_change_count = 0  # 연속 미변경 횟수
+
     # 시작 URL이 있으면 이동
     if start_url:
         await browser.navigate(start_url)
         logger.info(f"시작 URL로 이동: {start_url}")
 
-        # 팝업/오버레이 자동 제거
-        dismissed = await browser.dismiss_overlays()
-        if dismissed > 0:
-            logger.info(f"시작 페이지에서 오버레이 {dismissed}개 자동 제거")
+        # 팝업/오버레이 자동 해소 (resolve_blocker)
+        blocker_result = await browser.resolve_blocker()
+        if blocker_result.get("had_blocker"):
+            if blocker_result.get("resolved"):
+                logger.info(
+                    f"시작 페이지 블로커 해소 완료: {blocker_result.get('blocker_name', '')} "
+                    f"(방법: {blocker_result.get('method', '')})"
+                )
+            else:
+                logger.warning(
+                    f"시작 페이지 블로커 해소 실패: {blocker_result.get('blocker_name', '')} "
+                    f"({blocker_result.get('attempts', 0)}회 시도)"
+                )
 
     for step_num in range(1, max_steps + 1):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -108,17 +124,13 @@ async def run_agent_loop(
         try:
             # 1. Observation: 페이지 상태 추출
             state = await get_indexed_state(page)
-            
 
             logger.info(state.elements)
             logger.info("--------------------------------")
             logger.info(state.page_text)
             logger.info("--------------------------------")
             element_count = len(state.elements)
-            logger.info(
-                f"Step {step_num}: {state.url} "
-                f"({element_count}개 요소)"
-            )
+            logger.info(f"Step {step_num}: {state.url} ({element_count}개 요소)")
 
             # ── Stuck 감지 ──
             is_stuck = False
@@ -154,6 +166,19 @@ async def run_agent_loop(
             prev_element_count = element_count
 
             # 2. LLM: 다음 액션 결정
+            # no_state_change 경고 신호
+            no_state_change_warning = ""
+            if no_change_count >= 2:
+                no_state_change_warning = (
+                    f"\n## \u26a0\ufe0f 상태 미변경 경고 ({no_change_count}회 연속)\n"
+                    "직전 액션이 페이지에 아무 변화를 일으키지 못했습니다. "
+                    "URL, DOM 요소, 모달 상태 모두 동일합니다.\n"
+                    "아래 중 하나를 선택하세요:\n"
+                    "- 가려진 요소가 있다면 다른 요소를 클릭하거나 스크롤하세요\n"
+                    "- 버튼 클릭이 동작하지 않으면 keys('Enter') 또는 다른 네비게이션 방법을 시도하세요\n"
+                    "- 절대로 양식 입력(input)을 시도하지 마세요 — 양식이 열리지 않았습니다"
+                )
+
             llm_response = await invoke_llm(
                 llm=llm,
                 state_text=state.to_prompt_text(),
@@ -162,14 +187,24 @@ async def run_agent_loop(
                 step_history=step_history,
                 is_stuck=is_stuck,
                 collected_info=collected_info,
+                no_state_change_warning=no_state_change_warning,
             )
 
             # 3. 액션 파싱
             action = parse_action(llm_response)
-            logger.info(f"Step {step_num} 액션: {action.action} (reason: {action.reason})")
+            logger.info(
+                f"Step {step_num} 액션: {action.action} (reason: {action.reason})"
+            )
 
-            # 4. 액션 실행
-            result = await execute_action(page, action, state)
+            # 3-A. Pre-action 핑거프린트 캡처 (클릭/입력 액션만)
+            if action.action in ("click", "input", "select", "navigate"):
+                try:
+                    prev_fingerprint = await browser.get_state_fingerprint()
+                except Exception:
+                    prev_fingerprint = None
+
+            # 4. 액션 실행 (browser 전달하여 obstruction 검사 활성화)
+            result = await execute_action(page, action, state, browser=browser)
 
             # 스텝 로그 기록
             step_log = StepLog(
@@ -247,6 +282,28 @@ async def run_agent_loop(
 
             # 6. 실패 처리
             if not result.success:
+                # blocked_by_modal → resolve_blocker() 자동 호출 후 재시도
+                if result.error == "blocked_by_modal":
+                    logger.info("모달 차단 감지 → resolve_blocker() 자동 호출")
+                    blocker_result = await browser.resolve_blocker()
+                    if blocker_result.get("resolved"):
+                        logger.info(
+                            f"모달 해소 성공: {blocker_result.get('blocker_name', '')} "
+                            f"(방법: {blocker_result.get('method', '')}) → 다음 스텝에서 재시도"
+                        )
+                        # 실패 카운트 증가하지 않고 다음 스텝으로 (재시도)
+                        step_history.append(
+                            f"Step {step_num}: {action.action} → blocked_by_modal "
+                            f"→ resolve_blocker 성공 ({blocker_result.get('method', '')})"
+                        )
+                        await asyncio.sleep(0.5)
+                        continue
+                    else:
+                        logger.warning(
+                            f"모달 해소 실패: {blocker_result.get('blocker_name', '')} "
+                            f"({blocker_result.get('attempts', 0)}회 시도)"
+                        )
+
                 failure_count += 1
                 logger.warning(
                     f"Step {step_num} 실패 ({failure_count}/{max_failures}): "
@@ -266,6 +323,48 @@ async def run_agent_loop(
                 # URL이 바뀌면 stuck 히스토리도 리셋
                 if state.url != prev_url:
                     recent_actions.clear()
+
+            # ── Post-action 상태 변경 감지 ──
+            if result.success and action.action in (
+                "click",
+                "input",
+                "select",
+                "navigate",
+            ):
+                await asyncio.sleep(0.5)  # 페이지 반응 대기
+                try:
+                    post_fingerprint = await browser.get_state_fingerprint()
+                    if prev_fingerprint and post_fingerprint:
+                        changed = (
+                            post_fingerprint.get("url") != prev_fingerprint.get("url")
+                            or post_fingerprint.get("has_modal")
+                            != prev_fingerprint.get("has_modal")
+                            or post_fingerprint.get("focus_tag")
+                            != prev_fingerprint.get("focus_tag")
+                            or abs(
+                                post_fingerprint.get("interactive_count", 0)
+                                - prev_fingerprint.get("interactive_count", 0)
+                            )
+                            > 3
+                            or post_fingerprint.get("title")
+                            != prev_fingerprint.get("title")
+                        )
+                        if not changed:
+                            no_change_count += 1
+                            logger.warning(
+                                f"Post-action 상태 미변경 감지 "
+                                f"(연속 {no_change_count}회): {action.action}"
+                            )
+                            step_history.append(
+                                f"Step {step_num}: {action.action} → [NO_STATE_CHANGE] "
+                                f"페이지에 변화 없음"
+                            )
+                        else:
+                            no_change_count = 0
+                except Exception:
+                    pass  # 핑거프린트 실패시 무시
+                continue  # 이미 대기 완료
+
             # 페이지 로딩 대기
             await asyncio.sleep(0.5)
 

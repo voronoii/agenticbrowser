@@ -29,6 +29,8 @@ SYSTEM_PROMPT = """\
 4. 태스크가 완료되면 반드시 done 액션을 사용하세요.
 5. 막히거나 확신이 없으면 ask_human 액션을 사용하세요.
 6. 페이지에 광고 팝업, 쿠키 동의 배너, 앱 설치 유도 등 태스크와 무관한 오버레이가 보이면 먼저 닫기 버튼을 클릭하여 제거하세요. 단, 태스크 수행을 위해 필요한 팝업/모달(예: 로그인 창, 검색 필터, 결제 창 등)은 절대 닫지 말고 그 안에서 필요한 액션을 진행하세요.
+7. "⚠️ 팝업이 활성화되어 있습니다"라는 안내가 보이면, 아래 나열된 요소는 팝업 내부 요소입니다. 이 상태에서는 반드시 팝업 내부 요소만 사용하세요. 팝업 닫기가 필요하면 "닫기", "X", "확인" 등의 버튼을 클릭하세요.
+8. "⚠️ 상태 미변경 경고"가 보이면, 직전 액션이 페이지에 아무 효과가 없었다는 뜻입니다. 이 경우 절대 같은 액션을 반복하지 마세요. 특히 양식 입력(input)은 로그인 창 등 양식이 실제로 화면에 열려 있을 때만 시도하세요. 양식이 열리지 않은 상태에서 input을 시도하면 잘못된 요소에 입력됩니다.
 
 ## 응답 형식
 action 필드에는 액션명만 쓰고, 파라미터는 별도 필드로 지정하세요.
@@ -138,6 +140,7 @@ async def invoke_llm(
     step_history: list[str] | None = None,
     is_stuck: bool = False,
     collected_info: list[str] | None = None,
+    no_state_change_warning: str = "",
 ) -> str:
     """LLM에게 다음 액션을 요청
 
@@ -149,7 +152,7 @@ async def invoke_llm(
         step_history: 이전 스텝 이력 (선택)
         is_stuck: 반복 패턴 감지 시 True
         collected_info: 이전 스텝에서 memo로 수집된 정보 목록 (선택)
-
+        no_state_change_warning: 상태 미변경 시 LLM에게 전달할 경고 메시지
     Returns:
         LLM 응답 텍스트 (JSON 액션)
     """
@@ -181,6 +184,10 @@ async def invoke_llm(
             "- 스크롤 대신 특정 요소를 클릭하세요\n"
             "- 현재 페이지에서 태스크를 수행할 수 없다면 done 또는 ask_human을 사용하세요"
         )
+
+    # 상태 미변경 경고
+    if no_state_change_warning:
+        user_prompt_parts.append(no_state_change_warning)
 
     user_prompt_parts.append(
         "\n## 지시\n"

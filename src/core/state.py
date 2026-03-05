@@ -271,19 +271,121 @@ _EXTRACT_JS = """() => {
     const results = [];
     let index = 1;
 
+    // ── Phase 7-A: 활성 모달 감지 ──
+    // 최상위 활성 모달을 찾아 interaction scope를 결정한다.
+    // 모달이 활성화되면 모달 내부 요소만 인덱싱한다.
+    let activeModalRoot = null;
+    let activeModalInfo = { detected: false, name: '', selector: '' };
+
+    // 감지 우선순위: dialog[open] > [role="dialog"] > [role="alertdialog"] > [aria-modal="true"] > 휴리스틱(고 z-index 오버레이)
+    // 주의: 모달 감지용 가시성은 isVisible보다 관대해야 함
+    // (opacity: 0인 CSS 애니메이션 진입 중인 모달도 감지해야 하므로)
+    function isModalVisible(el) {
+        const s = window.getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden') return false;
+        // opacity는 체크하지 않음 — 애니메이션 진입 중(opacity:0→1) 모달 허용
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    }
+    const modalCandidates = [];
+    // 1. 네이티브 <dialog open>
+    for (const d of document.querySelectorAll('dialog[open]')) {
+        if (isModalVisible(d)) modalCandidates.push(d);
+    }
+    // 2. role="dialog"
+    for (const d of document.querySelectorAll('[role="dialog"]')) {
+        if (isModalVisible(d) && !modalCandidates.includes(d)) modalCandidates.push(d);
+    }
+    // 3. role="alertdialog"
+    for (const d of document.querySelectorAll('[role="alertdialog"]')) {
+        if (isModalVisible(d) && !modalCandidates.includes(d)) modalCandidates.push(d);
+    }
+    // 4. aria-modal="true"
+    for (const d of document.querySelectorAll('[aria-modal="true"]')) {
+        if (isModalVisible(d) && !modalCandidates.includes(d)) modalCandidates.push(d);
+    }
+    // 5. 휴리스틱: 고 z-index + fixed/absolute 위치 + 뷰포트 대부분 차지하는 오버레이
+    //    호갱노노 같은 사이트는 <div>로 팝업을 만들고 ARIA 속성을 붙이지 않음
+    if (modalCandidates.length === 0) {
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const MIN_Z = 999;
+        const MIN_AREA_RATIO = 0.15;  // 뷰포트의 15% 이상 차지
+        const heuristicCands = [];
+        // body 직계 자식 또는 최상위 컨테이너에서 찾기 (너무 깊은 탐색 방지)
+        const topLevelEls = document.body.children;
+        for (const el of topLevelEls) {
+            if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE' || el.tagName === 'LINK') continue;
+            const cs = window.getComputedStyle(el);
+            const pos = cs.position;
+            if (pos !== 'fixed' && pos !== 'absolute') continue;
+            const z = parseInt(cs.zIndex) || 0;
+            if (z < MIN_Z) continue;
+            if (!isVisible(el)) continue;
+            const r = el.getBoundingClientRect();
+            const area = r.width * r.height;
+            const vpArea = vw * vh;
+            if (area / vpArea < MIN_AREA_RATIO) continue;
+            // 단순 backdrop(빈 오버레이)은 제외 — 닫기 버튼이나 텍스트가 있는 것만
+            const hasContent = el.querySelector('button, a, input, [role="button"], h1, h2, h3, h4, img');
+            if (!hasContent) continue;
+            heuristicCands.push({ el, z, area });
+        }
+        // z-index가 가장 높은 것 선택
+        if (heuristicCands.length > 0) {
+            heuristicCands.sort((a, b) => b.z - a.z || b.area - a.area);
+            modalCandidates.push(heuristicCands[0].el);
+        }
+    }
+
+    if (modalCandidates.length > 0) {
+        // 최상위 모달 선택 (z-index가 가장 높은 것, 또는 DOM 순서 마지막)
+        let topModal = modalCandidates[0];
+        let topZ = -Infinity;
+        for (const m of modalCandidates) {
+            const z = parseInt(window.getComputedStyle(m).zIndex) || 0;
+            if (z >= topZ) { topZ = z; topModal = m; }
+        }
+        activeModalRoot = topModal;
+
+        // 모달 이름 추출
+        const modalName = topModal.getAttribute('aria-label')
+            || topModal.getAttribute('aria-labelledby')
+                && document.getElementById(topModal.getAttribute('aria-labelledby'))?.textContent?.trim()
+            || topModal.querySelector('h1,h2,h3,h4,[class*="title"],[class*="header"]')?.textContent?.trim()
+            || topModal.tagName.toLowerCase();
+
+        // 모달 셀렉터 생성
+        let modalSelector = topModal.tagName.toLowerCase();
+        if (topModal.id) modalSelector = '#' + CSS.escape(topModal.id);
+        else if (topModal.getAttribute('role')) modalSelector = '[role="' + topModal.getAttribute('role') + '"]';
+        else if (topModal.tagName.toLowerCase() === 'dialog') modalSelector = 'dialog[open]';
+
+        activeModalInfo = {
+            detected: true,
+            name: (modalName || '').substring(0, 80),
+            selector: modalSelector,
+        };
+    }
+
     for (const el of sorted) {
         // 뷰포트 밖 요소는 건너뜀
         if (!inViewport(el)) continue;
+
+        // ── 모달 스코프 필터링 ──
+        // 활성 모달이 있으면 모달 내부 요소만 허용
+        if (activeModalRoot) {
+            if (!activeModalRoot.contains(el)) continue;
+        }
 
         const tag = el.tagName.toLowerCase();
         const role = inferRole(el);
         const name = extractName(el);
 
-        // 미명명 요소 제거: "(tag.class)" 폴백 이름 + 네이티브 인터랙티브 아님 + generic role
-        // → LLM에 가치 없는 노이즈이므로 제거
+        // 미명명 요소 제거: "(tag.class)" 폴백 이름 + 네이티브 인터랙티브 아님
+        // cursor:pointer div도 이름 없으면 LLM이 식별 불가 → 노이즈이므로 제거
         const isFallbackName = name.startsWith('(') && name.endsWith(')');
         const isNative = ['button', 'input', 'select', 'textarea', 'a', 'summary'].includes(tag);
-        if (isFallbackName && !isNative && role === 'generic') {
+        if (isFallbackName && !isNative) {
             continue;
         }
 
@@ -314,7 +416,7 @@ _EXTRACT_JS = """() => {
         index++;
     }
 
-    return results;
+    return { elements: results, activeModal: activeModalInfo };
 }"""
 
 # ---------------------------------------------------------------------------
@@ -347,13 +449,23 @@ def _truncate_yaml(yaml_text: str, max_chars: int) -> str:
     return '\n'.join(result)
 
 
-async def _get_aria_snapshot(page: Page, max_chars: int) -> str:
+async def _get_aria_snapshot(page: Page, max_chars: int, modal_selector: str = "") -> str:
     """Accessibility Tree YAML 스냅샷 추출
 
-    1차: main/article 영역만 추출 (본문 집중)
-    2차: body 전체 추출 (main이 없는 페이지)
-    3차: 기존 innerText 폴백
+    모달이 활성화된 경우 모달 영역에서 추출.
+    그 외에는 main/article → body → innerText 순서로 폴백.
     """
+    # 0차: 활성 모달이 있으면 모달에서 추출
+    if modal_selector:
+        try:
+            locator = page.locator(modal_selector).first
+            if await locator.count() > 0:
+                snapshot = await locator.aria_snapshot()
+                if snapshot and len(snapshot.strip()) > 50:
+                    return _truncate_yaml(snapshot, max_chars)
+        except Exception:
+            pass
+
     # 1차: main 영역 우선
     for selector in ['main', '[role="main"]', 'article']:
         try:
@@ -427,19 +539,34 @@ class PageState:
     title: str
     elements: list[IndexedElement]
     page_text: str = ""  # 페이지 가시 텍스트 요약 (최대 2000자)
+    active_modal: bool = False  # 활성 모달/팝업 존재 여부
+    modal_description: str = ""  # 모달 이름/설명
 
     def to_prompt_text(self) -> str:
-        """LLM 프롬프트에 삽입할 전체 상태 텍스트"""
+        """엘엘엠 프롬프트에 삽입할 전체 상태 텍스트"""
         if not self.elements:
             return f"URL: {self.url}\n제목: {self.title}\n\n(상호작용 가능한 요소 없음)"
 
         elements_text = "\n".join(e.to_display() for e in self.elements)
-        text = (
-            f"URL: {self.url}\n"
-            f"제목: {self.title}\n"
-            f"상호작용 가능 요소 ({len(self.elements)}개):\n"
-            f"{elements_text}"
-        )
+
+        # 모달 활성 시 컨텍스트 안내 추가
+        if self.active_modal:
+            modal_label = self.modal_description or '팝업'
+            text = (
+                f"URL: {self.url}\n"
+                f"제목: {self.title}\n"
+                f"\n⚠️ 팝업이 활성화되어 있습니다: {modal_label}\n"
+                f"아래는 팝업 내부 요소입니다. 팝업을 닫거나 팝업 내에서 작업하세요.\n"
+                f"\n팝업 내 상호작용 가능 요소 ({len(self.elements)}개):\n"
+                f"{elements_text}"
+            )
+        else:
+            text = (
+                f"URL: {self.url}\n"
+                f"제목: {self.title}\n"
+                f"상호작용 가능 요소 ({len(self.elements)}개):\n"
+                f"{elements_text}"
+            )
 
         if self.page_text:
             text += f"\n\n페이지 콘텐츠 (Accessibility Tree):\n{self.page_text}"
@@ -463,15 +590,31 @@ async def get_indexed_state(page: Page) -> PageState:
     1) 표준 인터랙티브 요소 (a, button, input 등 + ARIA role)
     2) cursor:pointer 요소 (div 클릭 핸들러 등)
     3) data-aidx 속성 주입으로 안정적 요소 위치 확보
+    4) 활성 모달 감지 시 모달 내부 요소만 반환
     """
-    try:
-        raw_elements = await page.evaluate(_EXTRACT_JS)
-    except Exception as e:
-        logger.warning(f"DOM 요소 추출 실패: {e}")
-        raw_elements = []
+    # JS 추출 결과는 이제 { elements: [...], activeModal: {...} } 객체
+    active_modal = False
+    modal_description = ""
+    modal_selector = ""
 
     try:
-        page_text = await _get_aria_snapshot(page, A11Y_TEXT_LIMIT)
+        raw_result = await page.evaluate(_EXTRACT_JS)
+    except Exception as e:
+        logger.warning(f"DOM 요소 추출 실패: {e}")
+        raw_result = {"elements": [], "activeModal": {"detected": False}}
+
+    # 활성 모달 정보 파싱
+    modal_info = raw_result.get("activeModal", {})
+    if modal_info.get("detected", False):
+        active_modal = True
+        modal_description = modal_info.get("name", "")
+        modal_selector = modal_info.get("selector", "")
+        logger.info(f"활성 모달 감지: {modal_description} ({modal_selector})")
+
+    raw_elements = raw_result.get("elements", [])
+
+    try:
+        page_text = await _get_aria_snapshot(page, A11Y_TEXT_LIMIT, modal_selector=modal_selector)
     except Exception:
         page_text = ""
 
@@ -491,11 +634,15 @@ async def get_indexed_state(page: Page) -> PageState:
             )
         )
 
-    logger.info(f"DOM 추출 완료: {len(elements)}개 요소")
+    logger.info(f"DOM 추출 완료: {len(elements)}개 요소" + (
+        f" (모달 내부)" if active_modal else ""
+    ))
 
     return PageState(
         url=page.url,
         title=await page.title(),
         elements=elements,
         page_text=page_text,
+        active_modal=active_modal,
+        modal_description=modal_description,
     )

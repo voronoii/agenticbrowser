@@ -1,8 +1,8 @@
 # 에이전트 루프 문제 진단: 임무 완수 실패
 
 > 작성일: 2026-03-03
-> 최종 업데이트: 2026-03-04
-> 대상 파일: `src/core/agent_loop.py`, `src/llm/client.py`, `src/core/actions.py`, `src/core/state.py`, `src/server.py`, `src/main.html`
+> 최종 업데이트: 2026-03-05
+> 대상 파일: `src/core/agent_loop.py`, `src/llm/client.py`, `src/core/actions.py`, `src/core/state.py`, `src/core/browser.py`, `src/server.py`, `src/main.html`
 
 ## 증상
 
@@ -330,19 +330,15 @@ async def on_ask_human(question: str) -> str:
 
 **원인:** 팝업 내부 요소와 본문 요소가 동일한 평면 리스트에 나열되어 LLM이 어느 요소가 팝업에 속하는지 구분 불가.
 
-**가능한 개선 방향:**
-- Accessibility Tree의 `dialog` 역할이 팝업 컨텍스트를 제공할 수 있음
-- `get_indexed_state`에서 팝업/오버레이 요소를 별도 그룹으로 표시
-- `z-index` / `position: fixed` 기반 레이어 분리
+> **[해결됨]** "Interaction Scope" 도입 — 활성 모달 감지 시 모달 내부 요소만 LLM에 전달. 아래 "구현 완료" 섹션 E 참조.
+> 단, 실전 테스트(호갱노노 재실행)는 미완료. 엣지 케이스(중첩 모달, iframe 내 모달, ARIA 미사용 팝업 등) 검증 필요.
 
-### 3. dismiss_overlays() 경량화
+### 3. dismiss_overlays() → resolve_blocker() 재설계
 
-현재 3단계(셀렉터 클릭 → 텍스트 스캔 → DOM 제거)가 과도하게 공격적.
+기존 3단계(셀렉터 클릭 → 텍스트 스캔 → DOM 제거)가 과도하게 공격적이었음.
 
-**제안:**
-- 1단계(셀렉터 클릭)에서 확실한 패턴만 유지
-- 2단계(텍스트 스캔), 3단계(DOM 제거) 제거 — 오탐/부작용 위험
-- 나머지는 에이전트 AI가 상황 판단해서 처리
+> **[해결됨]** `dismiss_overlays()` → `resolve_blocker()` 재설계 — 4단계 검증형 처리(닫기 버튼 → Escape → backdrop 클릭 → DOM 제거)로 전환. 매 시도 후 모달 실제 소멸 검증. 아래 "구현 완료" 섹션 E 참조.
+> 단, 실전 테스트 미완료. `_dismiss_cookie_banners()`로 분리한 쿠키 배너 처리가 기존 사이트들에서 정상 작동하는지 확인 필요.
 
 ---
 
@@ -377,3 +373,310 @@ LLM 추가 호출 없이 추출 품질을 개선하는 접근.
 | 역할 | 인터랙티브 요소 인덱싱 | 페이지 콘텐츠 이해 |
 
 **결론:** 둘은 상호 보완 관계. `get_indexed_state`는 요소 조작용, Accessibility Tree는 페이지 이해용.
+
+---
+
+### E. Interaction Scope 도입 (2026-03-05)
+
+#### 핵심 컨셉
+
+모달/팝업이 활성화되면 **모달 내부 요소만** LLM에 전달하여, LLM이 팝업 뒤 요소를 클릭하는 실수 자체를 원천 차단.
+
+기존 방식은 `[팝업]` 태그를 표시만 하고 전체 요소를 LLM에 전달했기 때문에, LLM이 태그를 무시하고 팝업 뒤 요소를 force click으로 관통하는 문제가 있었음.
+
+| 대안 | 채택 여부 | 이유 |
+|------|-----------|------|
+| LLM에 `[팝업]` 태그만 표시 | ❌ 기존 방식 | LLM이 무시하고 뒤 요소 클릭 |
+| dismiss_overlays() 패턴 보강 | ❌ | 모든 사이트의 모든 팝업 커버 불가 |
+| 스크린샷 기반 멀티모달 | ❌ | 토큰 비용 폭증, 근본 해결 아님 |
+| **모달 활성 시 요소 필터링 (채택)** | ✅ | LLM 입력 자체를 정확하게 → 잘못된 선택 불가 |
+
+#### 변경 파일 요약
+
+| 파일 | 변경량 | 역할 |
+|------|--------|------|
+| `src/core/state.py` | +185 | 모달 감지 + 요소 필터링 + PageState 확장 |
+| `src/core/browser.py` | +284 | `resolve_blocker()` 재설계 + 쿠키 배너 분리 |
+| `src/core/agent_loop.py` | +39 | resolve_blocker 통합 + blocked_by_modal 자동 재시도 |
+| `src/core/actions.py` | +24 | force click 게이팅 (모달 밖 요소 차단) |
+| `src/llm/client.py` | +1 | 시스템 프롬프트 규칙 7 추가 |
+
+#### E-1. `state.py` — 모달 감지 + 요소 스코프 필터링
+
+**`_EXTRACT_JS` 내부에 Phase 7-A 추가 (활성 모달 감지)**
+
+감지 우선순위:
+1. `<dialog open>` — 네이티브 HTML dialog
+2. `[role="dialog"]` — ARIA dialog
+3. `[role="alertdialog"]` — ARIA alert dialog
+4. `[aria-modal="true"]` — ARIA modal 속성
+5. **휴리스틱** — z-index ≥ 999 + fixed/absolute + 뷰포트 15% 이상 차지 + 내부에 인터랙티브 요소 있음
+
+5단계 휴리스틱은 호갱노노처럼 ARIA 속성 없이 `<div>`로 팝업을 만드는 사이트를 위한 폴백.
+
+```javascript
+// 모달 감지 후 요소 필터링
+if (activeModalRoot) {
+    if (!activeModalRoot.contains(el)) continue;  // 모달 밖 요소 스킵
+}
+```
+
+**반환 구조 변경:**
+```javascript
+// Before
+return results;  // IndexedElement[]
+
+// After
+return { elements: results, activeModal: activeModalInfo };
+// activeModalInfo: { detected: bool, name: string, selector: string }
+```
+
+**PageState 확장:**
+```python
+class PageState:
+    ...
+    active_modal: bool = False          # 활성 모달 존재 여부
+    modal_description: str = ""         # 모달 이름/설명
+```
+
+**to_prompt_text() 분기:**
+- 모달 활성 시: `"⚠️ 팝업이 활성화되어 있습니다: {name}"` + `"팝업 내 상호작용 가능 요소 (N개)"` 형식
+- 모달 비활성 시: 기존 `"상호작용 가능 요소 (N개)"` 형식 유지
+
+**_get_aria_snapshot() 확장:**
+- `modal_selector` 파라미터 추가
+- 모달 활성 시 모달 영역에서 a11y 스냅샷 추출 (main/article 대신)
+- 모달 비활성 시 기존 main → body → innerText 폴백 유지
+
+#### E-2. `browser.py` — resolve_blocker() 재설계
+
+기존 `dismiss_overlays()` → `resolve_blocker()` + `_dismiss_cookie_banners()` 분리.
+
+**resolve_blocker() 4단계 검증형 처리:**
+
+```
+활성 모달 감지 (_DETECT_MODAL_JS)
+  → 1단계: 모달 내부 닫기 버튼 클릭 (aria-label/텍스트 매칭: 닫기/close/x/×/확인)
+    → 검증: 모달 소멸 확인
+  → 2단계: Escape 키
+    → 검증: 모달 소멸 확인
+  → 3단계: backdrop 클릭 (모달 외부 영역)
+    → 검증: 모달 소멸 확인
+  → 4단계: DOM 제거 (최후 수단, backdrop도 함께 제거)
+    → 검증: 모달 소멸 확인
+  → 전부 실패 시: had_blocker=True, resolved=False 반환
+```
+
+**반환 구조:**
+```python
+{
+    'resolved': bool,        # 닫기 성공 여부
+    'had_blocker': bool,      # 블로커 존재 여부
+    'blocker_name': str,      # 블로커 이름
+    'method': str,            # 사용된 방법 (close_button/escape/backdrop/dom_removal/none)
+    'attempts': int,          # 시도 횟수
+}
+```
+
+**_dismiss_cookie_banners() 분리:**
+- 기존 `dismiss_overlays()`의 1단계(셀렉터 기반 쿠키 배너 제거)만 유지
+- 2단계(텍스트 스캔), 3단계(DOM 제거) 삭제 — 오탐/부작용 제거
+- `resolve_blocker()` 시작 시 먼저 실행
+
+**dismiss_overlays() 하위 호환:**
+```python
+async def dismiss_overlays(self) -> int:
+    """하위 호환용 래퍼"""
+    result = await self.resolve_blocker()
+    return 1 if result['resolved'] else 0
+```
+
+#### E-3. `actions.py` — force click 게이팅
+
+모달이 활성화된 상태에서 모달 밖(main layer) 요소를 클릭/입력하려 하면 force click을 차단하고 `blocked_by_modal` 에러 반환.
+
+```python
+# click/input 액션 모두 동일 로직 적용
+if state.active_modal and elem.layer == "main":
+    return ActionResult(
+        success=False,
+        action="click",
+        message='요소가 팝업에 가려져 클릭할 수 없습니다. 먼저 팝업을 닫아주세요.',
+        error="blocked_by_modal",
+    )
+```
+
+**기존 문제점:** 클릭 실패 → 무조건 force click → 팝업 뒤 요소 관통 → 상태 오염
+**변경 후:** 클릭 실패 + 모달 밖 타겟 → `blocked_by_modal` 에러 → LLM이 팝업 우선 처리
+
+#### E-4. `agent_loop.py` — resolve_blocker 통합
+
+**시작 시:**
+```python
+# Before
+dismissed = await browser.dismiss_overlays()
+
+# After
+blocker_result = await browser.resolve_blocker()
+# 성공/실패 로깅 포함
+```
+
+**액션 실패 시 자동 재시도:**
+```python
+if result.error == "blocked_by_modal":
+    blocker_result = await browser.resolve_blocker()
+    if blocker_result['resolved']:
+        # 실패 카운트 증가 없이 다음 스텝으로 (재시도 유도)
+        continue
+```
+
+이로써 LLM이 팝업 뒤 요소를 클릭 → blocked_by_modal → 자동으로 resolve_blocker() 호출 → 성공 시 재시도하는 자동 복구 루프가 형성됨.
+
+#### E-5. `client.py` — 시스템 프롬프트 규칙 7 추가
+
+```
+7. "⚠️ 팝업이 활성화되어 있습니다"라는 안내가 보이면, 아래 나열된 요소는 팝업 내부 요소입니다.
+   이 상태에서는 반드시 팝업 내부 요소만 사용하세요.
+   팝업 닫기가 필요하면 "닫기", "X", "확인" 등의 버튼을 클릭하세요.
+```
+
+#### 동작 흐름 (전체)
+
+```
+페이지 로드
+  → resolve_blocker(): 쿠키 배너 제거 + 모달 닫기 시도
+  → get_indexed_state():
+      활성 모달 감지? ──Yes──→ 모달 내부 요소만 인덱싱 + a11y 모달에서 추출
+                     └─No──→ 전체 요소 인덱싱 + a11y main/body에서 추출
+  → LLM 호출:
+      모달 활성? ──Yes──→ "⚠️ 팝업이 활성화" + 팝업 내 요소만 표시
+               └─No──→ 기존 형식
+  → 액션 실행:
+      클릭 실패 + 모달 밖 타겟? ──Yes──→ blocked_by_modal 반환
+                              └─No──→ force click 허용
+  → blocked_by_modal 발생 시:
+      resolve_blocker() 자동 호출 → 성공 시 다음 스텝에서 재시도
+```
+
+#### 미검증 사항 / 잠재 리스크
+
+| 항목 | 상태 | 설명 |
+|------|------|------|
+| 호갱노노 실전 테스트 | ❌ 미실행 | Interaction Scope 적용 후 로그인 시나리오 재테스트 필요 |
+| 중첩 모달 | ⚠️ 부분 대응 | 최상위 z-index 모달만 스코프 — 중첩 2단계 이상 미검증 |
+| iframe 내 모달 | ❌ 미대응 | 호갱노노 광고 팝업이 iframe 포함 — 프레임별 처리 미구현 |
+| ARIA 미사용 사이트 | ⚠️ 휴리스틱 의존 | z-index + fixed + 면적 기반 감지 — 오탐/미탐 가능 |
+| 닫을 수 없는 모달 | ⚠️ 부분 대응 | resolve_blocker 4단계 모두 실패 시 모달 내부에서 작업 유도 |
+| 미명명 요소 필터링 강화 | ⚠️ 부작용 가능 | `isFallbackName && !isNative` 조건 완화로 cursor:pointer div도 제거 — 일부 사이트에서 클릭 가능 요소 누락 가능 |
+| _dismiss_cookie_banners 축소 | ⚠️ 확인 필요 | 기존 2·3단계 제거 — 셀렉터에 안 잡히는 쿠키 배너가 남을 수 있음 |
+
+---
+
+### Section F: Obstruction-Based Architecture (2026-03-06)
+
+#### 문제 분석
+
+Section E의 Interaction Scope 구현 후에도 동일한 실패 체인이 반복됨:
+
+1. resolve_blocker()가 "게이트웨이 광고" 팝업을 DOM 제거로 성공적으로 처리
+2. BUT 하단 앱 설치 배너("호갱노노의 강력한 기능을...")가 지속 — z-index < 999이라 _DETECT_MODAL_JS 미감지
+3. 배너가 "로그인" 버튼을 물리적으로 가림 → 일반 클릭 실패 → force click 발동
+4. force click이 React 이벤트 핸들러를 제대로 트리거하지 못함 → 로그인 모달 미오픈
+5. 페이지 상태 동일(121개 요소, 모두 layer='main') → LLM이 로그인 폼 진입을 환각
+6. 검색 박스에 전화번호 입력 + ask_human 남발
+
+**핵심 인사이트**: 문제는 Interaction Scope 이전 단계에서 발생. 로그인 모달이 열리지 않으면 Interaction Scope가 활성화될 수 없음.
+
+#### 근본 원인
+
+| 원인 | 설명 |
+|------|------|
+| 모달 전용 감지 | _DETECT_MODAL_JS가 dialog/role=dialog/z-index>=999만 감지. sticky footer 배너는 미감지 |
+| force click 의존 | 일반 클릭 실패 시 바로 force:true 시도. force click은 Playwright actionability 우회하지만 React 이벤트 체인을 제대로 트리거 못함 |
+| 상태 변경 미검증 | 클릭 후 페이지가 실제로 변했는지 확인 안 함. LLM이 변화 없는 페이지에서 환각 |
+
+#### 아키텍처 변경: Obstruction-Based Detection
+
+Oracle 분석 결과를 기반으로 "모달 감지"에서 "차단 요소 감지"로 패러다임 전환:
+
+##### 1. Pre-click Obstruction Check (browser.py)
+
+```
+새 JS: _CHECK_OBSTRUCTION_JS
+- elementFromPoint()로 클릭 대상의 3개 지점 확인
+- 대상이 아닌 다른 요소가 최상위에 있으면 obstructed=true 반환
+- 차단 요소의 selector, tag, text, position, zIndex, rect 수집
+```
+
+##### 2. Obstruction Resolver (browser.py)
+
+```
+새 메서드: resolve_obstruction(obstruction)
+4단계 해소:
+1. 차단 요소 내 닫기 버튼 클릭
+2. CSS display:none (fixed/sticky 요소에만)
+3. 스크롤하여 대상을 차단 영역 밖으로 이동
+4. DOM 제거 (최후 수단)
+```
+
+##### 3. 5-Phase Click Strategy (actions.py)
+
+```
+Phase 1: 모달 스코프 검사 (기존 blocked_by_modal 로직 유지)
+Phase 2: elementFromPoint 차단 검사 → 자동 해소 시도
+Phase 3: scrollIntoView + 일반 클릭
+Phase 4: dispatchEvent 폴백 (mouseenter→mouseover→mousedown→mouseup→click 체인)
+Phase 5: force click (최후 수단)
+```
+
+##### 4. Post-action State Fingerprint (agent_loop.py + browser.py)
+
+```
+새 JS: _STATE_FINGERPRINT_JS
+- URL, title, has_modal, focus_tag, focus_id, interactive_count 캡처
+- 클릭/입력 전후로 비교하여 변경 감지
+- 연속 2회 이상 미변경 시 LLM에 경고 전달
+```
+
+##### 5. No-State-Change LLM Policy (client.py + agent_loop.py)
+
+```
+- no_change_count >= 2일 때 LLM에 경고 삽입:
+  "⚠️ 상태 미변경 경고: 직전 액션이 페이지에 아무 변화를 일으키지 못했습니다"
+  "절대로 양식 입력(input)을 시도하지 마세요 — 양식이 열리지 않았습니다"
+- 시스템 프롬프트 규칙 8 추가: 상태 미변경 시 환각 방지 지시
+```
+
+#### 코드 변경 내역
+
+| 파일 | 변경 | 라인 수 |
+|------|------|---------|
+| src/core/browser.py | +_CHECK_OBSTRUCTION_JS, +_STATE_FINGERPRINT_JS, +check_obstruction(), +get_state_fingerprint(), +resolve_obstruction() | +214 |
+| src/core/actions.py | click/input 케이스를 5-phase 전략으로 교체, +asyncio import, +BrowserManager import | +65 |
+| src/core/agent_loop.py | +prev_fingerprint/no_change_count 변수, +pre/post 핑거프린트 비교, +no_state_change_warning LLM 전달, execute_action에 browser= 전달 | +69 |
+| src/llm/client.py | +시스템 프롬프트 규칙 8, +no_state_change_warning 파라미터, LLM 프롬프트에 경고 삽입 | +10 |
+
+#### 기대 효과 (hogangnono 시나리오)
+
+```
+기존 흐름:
+1. 배너 미감지 → 클릭 실패 → force click → 모달 미오픈 → 환각
+
+새 흐름:
+1. 로그인 버튼 클릭 시도
+2. Phase 2: elementFromPoint가 하단 배너를 차단 요소로 감지
+3. resolve_obstruction()이 배너를 CSS hide (display:none)
+4. Phase 3: 일반 클릭 성공 → 로그인 모달 오픈
+5. Interaction Scope 활성화 → 모달 내부 요소만 표시
+6. LLM이 모달 내 전화번호/비밀번호 필드에 정확히 입력
+```
+
+#### 미검증 사항 / 잠재 리스크
+
+| 항목 | 상태 | 설명 |
+|------|------|------|
+| 호갱노노 실전 테스트 | ❌ 미실행 | Obstruction Architecture 적용 후 로그인 시나리오 재테스트 필요 |
+| dispatchEvent React 호환성 | ⚠️ 이론적 | MouseEvent 체인이 모든 React 버전에서 동작하는지 미검증 |
+| CSS hide 부작용 | ⚠️ 확인 필요 | display:none이 React/Vue 상태에 영향줄 수 있음 (DOM 제거보다 안전하지만) |
+| 핑거프린트 오탐 | ⚠️ 가능 | interactive_count 변화 임계값(>3)이 너무 관대/엄격할 수 있음 |
+| elementFromPoint 정확도 | ⚠️ 확인 필요 | iframe, shadow DOM 내부 요소에서는 정확하지 않을 수 있음 |

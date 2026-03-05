@@ -9,9 +9,9 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 from playwright.async_api import Page
-
+import asyncio
 from src.core.state import PageState, IndexedElement
-
+from src.core.browser import BrowserManager
 logger = logging.getLogger(__name__)
 
 
@@ -175,6 +175,7 @@ async def execute_action(
     page: Page,
     action: AgentAction,
     state: PageState,
+    browser: BrowserManager | None = None,
 ) -> ActionResult:
     """에이전트 액션을 Playwright 명령으로 변환하여 실행"""
     try:
@@ -182,30 +183,135 @@ async def execute_action(
             # === 기본 액션 (6개) ===
             case "click":
                 handle, elem = await _get_element_locator(page, state, action.index)
+
+                # ── Phase 1: 모달 스코프 검사 (기존 로직 유지) ──
+                if state.active_modal and elem.layer == "main":
+                    logger.warning(f"[{action.index}] 모달에 가려져 클릭 불가 (force click 차단)")
+                    return ActionResult(
+                        success=False,
+                        action="click",
+                        message=f'[{action.index}] "{elem.name}" 요소가 팝업에 가려져 클릭할 수 없습니다. 먼저 팝업을 닫아주세요.',
+                        error="blocked_by_modal",
+                    )
+
+                # ── Phase 2: 사전 차단 검사 (elementFromPoint) ──
+                if browser and action.index is not None:
+                    obstruction = await browser.check_obstruction(action.index)
+                    if obstruction.get('obstructed'):
+                        blocker_info = obstruction.get('blocker', {})
+                        blocker_text = blocker_info.get('text', '')[:60]
+                        logger.warning(
+                            f"[{action.index}] 차단 감지: {blocker_info.get('selector', '')} "
+                            f"(text: {blocker_text})"
+                        )
+                        # 차단 요소 자동 해소 시도
+                        resolve_result = await browser.resolve_obstruction(obstruction)
+                        if resolve_result.get('resolved'):
+                            logger.info(
+                                f"[{action.index}] 차단 해소 성공 "
+                                f"(method: {resolve_result.get('method', '')})"
+                            )
+                            # 해소 후 잠시 대기 후 일반 클릭 재시도
+                            await asyncio.sleep(0.3)
+                        else:
+                            logger.warning(f"[{action.index}] 차단 해소 실패 → dispatchEvent 펴백 시도")
+
+                # ── Phase 3: 일반 클릭 시도 ──
+                try:
+                    await handle.scroll_into_view_if_needed(timeout=3000)
+                except Exception:
+                    pass  # 스크롤 실패은 무시
+
                 try:
                     await handle.click(timeout=5000)
-                except Exception:
-                    # 오버레이 등으로 클릭이 차단되면 force 클릭
-                    logger.warning(f"[{action.index}] 일반 클릭 실패 → force 클릭 재시도")
+                    return ActionResult(
+                        success=True,
+                        action="click",
+                        message=f'[{action.index}] {elem.role} "{elem.name}" 클릭 완료',
+                    )
+                except Exception as click_err:
+                    logger.warning(f"[{action.index}] 일반 클릭 실패: {click_err}")
+
+                # ── Phase 4: dispatchEvent 펴백 (버블링 마우스 이벤트 체인) ──
+                try:
+                    await handle.evaluate("""(el) => {
+                        ['mouseenter', 'mouseover', 'mousedown', 'mouseup', 'click'].forEach(t => {
+                            el.dispatchEvent(new MouseEvent(t, {
+                                bubbles: true, cancelable: true, view: window
+                            }));
+                        });
+                    }""")
+                    logger.info(f"[{action.index}] dispatchEvent 펴백 클릭 성공")
+                    return ActionResult(
+                        success=True,
+                        action="click",
+                        message=f'[{action.index}] {elem.role} "{elem.name}" 클릭 완료 (dispatchEvent)',
+                    )
+                except Exception as dispatch_err:
+                    logger.warning(f"[{action.index}] dispatchEvent 펴백도 실패: {dispatch_err}")
+
+                # ── Phase 5: force click (최후 수단) ──
+                try:
+                    logger.warning(f"[{action.index}] 최후 수단: force 클릭 재시도")
                     await handle.click(force=True, timeout=5000)
-                return ActionResult(
-                    success=True,
-                    action="click",
-                    message=f"[{action.index}] {elem.role} \"{elem.name}\" 클릭 완료",
-                )
+                    return ActionResult(
+                        success=True,
+                        action="click",
+                        message=f'[{action.index}] {elem.role} "{elem.name}" 클릭 완료 (force)',
+                    )
+                except Exception as force_err:
+                    return ActionResult(
+                        success=False,
+                        action="click",
+                        message=f'[{action.index}] "{elem.name}" 클릭 실패: {force_err}',
+                        error="click_failed",
+                    )
 
             case "input":
                 handle, elem = await _get_element_locator(page, state, action.index)
+
+                # 모달 스코프 검사
+                if state.active_modal and elem.layer == "main":
+                    logger.warning(f"[{action.index}] 모달에 가려져 입력 불가 (force click 차단)")
+                    return ActionResult(
+                        success=False,
+                        action="input",
+                        message=f'[{action.index}] "{elem.name}" 요소가 팝업에 가려져 입력할 수 없습니다. 먼저 팝업을 닫아주세요.',
+                        error="blocked_by_modal",
+                    )
+
+                # 차단 검사 + 해소
+                if browser and action.index is not None:
+                    obstruction = await browser.check_obstruction(action.index)
+                    if obstruction.get('obstructed'):
+                        resolve_result = await browser.resolve_obstruction(obstruction)
+                        if resolve_result.get('resolved'):
+                            logger.info(f"[{action.index}] 입력 전 차단 해소 성공")
+                            await asyncio.sleep(0.3)
+
+                try:
+                    await handle.scroll_into_view_if_needed(timeout=3000)
+                except Exception:
+                    pass
+
                 try:
                     await handle.click(timeout=5000)
                 except Exception:
-                    logger.warning(f"[{action.index}] 일반 클릭 실패 → force 클릭 재시도")
-                    await handle.click(force=True, timeout=5000)
+                    # 클릭 실패 시 dispatchEvent 펴백
+                    try:
+                        await handle.evaluate("""(el) => {
+                            el.dispatchEvent(new MouseEvent('click', {
+                                bubbles: true, cancelable: true, view: window
+                            }));
+                        }""")
+                    except Exception:
+                        await handle.click(force=True, timeout=5000)
+
                 await handle.fill(action.text or "")
                 return ActionResult(
                     success=True,
                     action="input",
-                    message=f"[{action.index}] \"{action.text}\" 입력 완료",
+                    message=f'[{action.index}] "{action.text}" 입력 완료',
                 )
 
             case "keys":
