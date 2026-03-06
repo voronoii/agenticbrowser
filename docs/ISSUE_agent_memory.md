@@ -680,3 +680,158 @@ Phase 5: force click (최후 수단)
 | CSS hide 부작용 | ⚠️ 확인 필요 | display:none이 React/Vue 상태에 영향줄 수 있음 (DOM 제거보다 안전하지만) |
 | 핑거프린트 오탐 | ⚠️ 가능 | interactive_count 변화 임계값(>3)이 너무 관대/엄격할 수 있음 |
 | elementFromPoint 정확도 | ⚠️ 확인 필요 | iframe, shadow DOM 내부 요소에서는 정확하지 않을 수 있음 |
+
+---
+
+### Section G: `asyncio` 변수 스코핑 버그 — click/input 액션 실행 실패 (2026-03-06)
+
+#### 현상
+
+Section F의 Obstruction Architecture 적용 후 실전 테스트(agent_20260306_011254.log)에서:
+- 차단 감지 + 해소까지는 성공하지만, 직후 `await asyncio.sleep(0.3)` 호출 시 에러 발생
+- 에러 메시지: `cannot access local variable 'asyncio' where it is not associated with a value`
+- click 액션: Step 1에서 실패 → Step 2에서 차단이 이미 제거되어 sleep 경로 미도달 → 우연히 성공
+- input 액션: Step 3~7에서 매번 차단 해소 → sleep 경로 → **5회 연속 실패**
+
+```
+Step 1: click [119] → 차단 해소(css_hide) → asyncio.sleep → ❌ UnboundLocalError
+Step 2: click [119] → 차단 없음 (sleep 안 탐) → ✅ 로그인 모달 열림
+Step 3: input [117] → 차단 해소 → asyncio.sleep → ❌ UnboundLocalError
+Step 4: input [117] → 차단 해소 → asyncio.sleep → ❌ UnboundLocalError
+Step 5~7: 동일 패턴 반복 → ❌ ❌ ❌
+```
+
+#### 근본 원인
+
+`actions.py`의 `execute_action()` 함수 내부 Python 변수 스코핑 문제:
+
+```python
+# actions.py
+import asyncio                          # line 12: 모듈 레벨 ✅
+
+async def execute_action(...):
+    match action.action:
+        case "click":
+            await asyncio.sleep(0.3)    # line 215: 모듈 레벨 참조 기대 → ❌ 로컬로 취급됨
+        case "input":
+            await asyncio.sleep(0.3)    # line 290: 동일 문제 → ❌
+        case "wait":
+            import asyncio               # line 366: ❌ 이게 함수 전체 오염
+            await asyncio.sleep(seconds)
+```
+
+Python은 함수 컴파일 시 `import asyncio`(line 366)를 함수 전체의 로컬 변수 할당으로 인식한다.
+`match/case`는 별도 스코프가 아닌 동일 함수 스코프이므로, `case "click"`이나 `case "input"`에서
+`asyncio`를 참조할 때 아직 할당되지 않은 로컬 변수에 접근하여 `UnboundLocalError` 발생.
+
+#### 해결
+
+`case "wait":` 내부의 중복 `import asyncio` (line 366) **1줄 삭제**.
+모듈 레벨 import (line 12)로 충분.
+
+```diff
+ # actions.py
+             case "wait":
+-                import asyncio
+                 if action.text:
+```
+
+#### 변경 파일
+
+| 파일 | 변경 내용 |
+|------|----------|
+| `src/core/actions.py` | `case "wait":` 내부의 `import asyncio` 1줄 삭제 |
+
+#### 잠재 리스크 / 추가 검토
+
+| 항목 | 상태 | 설명 |
+|------|------|------|
+| `import base64` (line 355, `case "screenshot"`) | ⚠️ 잠재 | 동일 패턴이나 다른 case에서 base64 미참조로 현재는 무해. 향후 참조 추가 시 동일 버그 발생 가능 |
+| 실전 로그인 테스트 | ❌ 미실행 | 수정 후 input 액션이 정상 동작하는지 hogangnono.com 재테스트 필요 |
+
+
+
+### 이제까지 시도들에 대한 평가
+검토 결과
+근본 해결이 잘 된 부분
+Section A (memo/collected_info) — 근본적 해결 맞습니다. 무상태 LLM 호출에 크로스-페이지 메모리를 추가한 것은 정확한 접근입니다. 코드에서도 agent_loop.py에서 누적, client.py에서 매 스텝 LLM에 전달까지 확인됩니다.
+
+Section B (Accessibility Tree) — 근본적 해결 맞습니다. innerText가 네비/광고에 2000자를 소진하는 문제를 aria_snapshot()의 구조화된 YAML로 대체한 것은 올바릅니다. main/article 우선 추출 → body 폴백 → innerText 폴백 3단계도 적절합니다.
+
+Section G (asyncio 스코핑 버그) — 근본적 해결 맞습니다. Python의 함수-레벨 스코핑 문제를 정확히 진단하고 1줄 삭제로 해결했습니다.
+
+근본 해결이 불완전한 부분
+1. prev_url 비교 버그 — 문서에 미기록, stuck detection이 사실상 작동하지 않음
+agent_loop.py 에서:
+
+
+# line 165: 스텝 시작 시 prev_url을 현재 URL로 설정
+prev_url = state.url
+
+# ... (액션 실행) ...
+
+# line 324: 성공 후 URL 변경 체크
+if state.url != prev_url:   # ← 항상 False!
+    recent_actions.clear()
+prev_url이 이미 현재 state.url로 덮어쓰여진 뒤에 비교하므로 항상 False입니다. recent_actions.clear()가 절대 실행되지 않아, 다른 URL로 이동해도 이전 URL에서의 반복 액션 기록이 남습니다. 이는 오탐 stuck abort를 유발할 수 있습니다.
+
+수정: prev_url 갱신을 스텝 끝으로 이동하거나, 비교 시 get_indexed_state() 이전에 저장해둔 값을 사용해야 합니다.
+
+2. 핑거프린트의 has_modal 불일치
+_STATE_FINGERPRINT_JS는 dialog[open], [role="dialog"] 등 시맨틱 셀렉터만 사용하지만, _EXTRACT_JS의 모달 감지(Phase 7-A)는 z-index ≥ 999 휴리스틱도 사용합니다. 호갱노노처럼 ARIA 없이 <div>로 팝업을 만드는 사이트에서:
+
+_EXTRACT_JS: 모달 감지 → 요소 필터링 작동
+_STATE_FINGERPRINT_JS: has_modal = false → 상태 변경 미감지 → no-change 경고 오발
+이는 Section F의 상태 핑거프린트가 Section E의 모달 감지와 일관성이 없는 문제입니다.
+
+3. Section E/F의 실전 미검증 — 근본 해결 여부를 판단할 수 없음
+문서에도 명시되어 있지만, Section E(Interaction Scope)와 Section F(Obstruction Architecture)는 실전 테스트 없이 이론적으로만 설계되었습니다. logs/ 디렉토리가 비어있고, test_obstruction.py도 실행 기록이 없습니다. 특히 Section F는 Section E 적용 후에도 실패한 시나리오에 대한 추가 대응인데, F까지 적용 후 호갱노노 재테스트가 없으면 해결 여부를 확인할 수 없습니다.
+
+4. collected_info가 UI에 전달되지 않음
+server.py의 결과 브로드캐스트에서 collected_info가 빠져있습니다:
+
+
+# server.py lines 219-227
+await broadcast({
+    "type": "result",
+    "success": result.success,
+    "message": result.message,
+    # collected_info 없음!
+})
+에이전트가 memo를 열심히 수집해도 사용자에게는 result.message만 전달됩니다. done 액션의 result 필드에 모든 수집 정보를 종합하라는 프롬프트 지시에 의존하고 있는데, LLM이 이를 충실히 따르지 않으면 수집 정보가 유실됩니다.
+
+5. import base64 잠재 버그 — 문서에 기록되어 있지만 미수정
+Section G에서 import asyncio 패턴을 수정하면서 동일 패턴인 import base64(actions.py line 355, case "screenshot" 내부)를 수정하지 않았습니다. 문서에도 "잠재"로 표시만 해뒀는데, 향후 다른 case에서 base64를 참조하면 동일 UnboundLocalError가 재발합니다. 발견 시 바로 수정하는 것이 맞습니다.
+
+설계 수준의 우려
+근본적 질문: "LLM 프롬프트 지시에 대한 과도한 의존"
+현재 해결책 다수가 시스템 프롬프트에 행동 규칙을 추가하는 방식입니다:
+
+프롬프트 규칙	의존하는 LLM 행동
+memo에 실제 데이터만 기록하라	LLM이 의도 vs 데이터를 구분
+done에 완성된 답변을 작성하라	LLM이 수집 정보를 빠짐없이 종합
+이미 방문한 링크를 재방문하지 마라	LLM이 collected_info를 대조
+상태 미변경 시 같은 액션 반복하지 마라	LLM이 경고를 준수
+팝업 내부 요소만 사용하라	LLM이 팝업 안내를 준수
+ask_human을 남발하지 마라	LLM이 자율 판단
+이것들은 코드 수준 안전장치 없이 LLM 준수에 의존합니다. 실제 로그(Section B에 인용된 agent_20260303_165941.log)에서 이미 LLM이 프롬프트 규칙을 무시하고 "수집 예정" 같은 계획만 memo에 기록한 사례가 확인됩니다.
+
+반면 Section E(모달 시 요소 필터링)와 Section F(obstruction 차단)는 코드 수준에서 잘못된 행동 자체를 불가능하게 만드는 접근으로, 이것이 더 근본적입니다. 가능한 한 프롬프트 규칙은 코드 수준 강제로 대체하는 것이 좋습니다. 예를 들어:
+
+memo 검증: memo 내용에 "예정", "하겠습니다" 등 의도 표현이 포함되면 코드에서 거부하고 LLM에 재작성 요청
+done 결과 검증: collected_info가 있는데 result가 짧으면(예: 50자 미만) 코드에서 거부
+asyncio.get_event_loop() 사용 (server.py line 188)
+Python 3.10+에서 deprecated입니다. asyncio.get_running_loop().create_future()로 교체해야 합니다.
+
+요약
+영역	근본적 해결?	비고
+A. memo/collected_info	예	핵심 아키텍처 잘 설계됨
+B. Accessibility Tree	예	innerText 한계를 정확히 해결
+C. 시스템 프롬프트	부분적	LLM 준수에 의존, 코드 강제 보완 필요
+D. ask_human 대기	예	Future 패턴 적절
+E. Interaction Scope	설계 적절, 미검증	실전 테스트 필수
+F. Obstruction Architecture	설계 적절, 미검증	실전 테스트 필수
+G. asyncio 버그	예	import base64 동일 패턴 잔존
+prev_url 버그	문서 미기록	stuck detection 무력화
+핑거프린트 has_modal 불일치	문서 미기록	휴리스틱 모달 변경 미감지
+전반적으로 문제 진단 능력과 해결 방향은 정확합니다. 다만 실전 테스트 부재, prev_url 비교 버그, 핑거프린트 불일치, 프롬프트 의존 과다가 근본 해결을 위해 추가로 다뤄져야 할 부분입니다.

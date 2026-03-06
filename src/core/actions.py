@@ -363,7 +363,6 @@ async def execute_action(
                 )
 
             case "wait":
-                import asyncio
                 if action.text:
                     # 셀렉터 대기
                     await page.wait_for_selector(action.text, timeout=10000)

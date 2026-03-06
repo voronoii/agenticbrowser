@@ -1644,6 +1644,205 @@ ws.send(JSON.stringify({
 - 사람의 텍스트 지시는 `invoke_llm()`의 `human_hint` 파라미터로 LLM에게 전달
 - Pause 중에도 브라우저는 열려있어 사람이 자유롭게 조작 가능
 
+### 12. Obstruction 기반 클릭 아키텍처 — elementFromPoint + 5-Phase Click + State Fingerprint (2026-03-06)
+
+**현상**: 호갱노노 등 실제 사이트에서 로그인 버튼 클릭 시 sticky 배너(div.css-1sry7v, position:fixed, z-index:15)가
+버튼 위를 덮고 있어 Playwright `click()`이 배너를 클릭함. 이를 해결하려 `force: True`로 전환하면
+이벤트 버블링이 생략되어 React/Vue 이벤트 핸들러가 동작하지 않음. 결과적으로 로그인 모달이 열리지 않는데,
+LLM은 상태 변화 없이도 "모달이 열렸다"고 hallucinate하며 존재하지 않는 input에 타이핑을 시도함.
+
+**문제 체인**:
+```
+sticky 배너가 버튼 덮음 → normal click이 배너에 도달
+→ force click으로 전환 → React 핸들러 무시됨 → 모달 안 열림
+→ 상태 변화 없음 → LLM이 모달 열렸다고 hallucinate
+→ 존재하지 않는 input에 타이핑 시도 → 무한 반복
+```
+
+**근본 원인 분석**: 기존 `dismiss_overlays()`는 z-index≥100 + 화면 50%+ 요소만 제거하므로
+z-index:15의 작은 sticky 배너는 탐지 불가. 또한 "클릭 전에 방해물이 있는지 확인"하는 메커니즘 자체가 없었음.
+force click은 방해물을 우회하지만 SPA 이벤트 시스템도 우회하는 부작용이 있음.
+
+**해결 (Phase 1-A) — 3-Pillar 아키텍처**:
+
+#### Pillar 1: Pre-Click Obstruction Detection (`browser.py`)
+
+`elementFromPoint()` API를 사용하여 클릭 대상 요소의 3개 지점(중앙, 좌상단+5px, 우하단-5px)에서
+실제로 어떤 요소가 최상위에 있는지 검사. ARIA 속성이나 z-index 임계값에 의존하지 않으므로
+모든 종류의 overlapping 요소를 탐지 가능.
+
+```python
+# browser.py — check_obstruction(page, aidx)
+_CHECK_OBSTRUCTION_JS = '''
+(aidx) => {
+    const el = document.querySelector(`[data-aidx="${aidx}"]`);
+    if (!el) return { obstructed: false };
+    const rect = el.getBoundingClientRect();
+    const points = [
+        [rect.left + rect.width/2, rect.top + rect.height/2],  // 중앙
+        [rect.left + 5, rect.top + 5],                          // 좌상단
+        [rect.right - 5, rect.bottom - 5],                      // 우하단
+    ];
+    for (const [x, y] of points) {
+        const top = document.elementFromPoint(x, y);
+        if (top && top !== el && !el.contains(top) && !top.contains(el)) {
+            return {
+                obstructed: true,
+                blocker_tag: top.tagName,
+                blocker_class: top.className,
+                blocker_style: {
+                    position: getComputedStyle(top).position,
+                    zIndex: getComputedStyle(top).zIndex
+                }
+            };
+        }
+    }
+    return { obstructed: false };
+}
+'''
+```
+
+**Obstruction 해결 4단계** (`resolve_obstruction()`):
+1. **dismiss_button** — 방해 요소 내부의 닫기 버튼 탐색 (✕, 닫기, close 등)
+2. **css_hide** — `display: none !important` 적용 (DOM 유지, 레이아웃만 제거)
+3. **scroll** — `scrollIntoView({ block: 'center' })` 후 재검사
+4. **dom_removal** — `element.remove()`로 DOM에서 완전 제거 (최후 수단)
+
+#### Pillar 2: 5-Phase Click Strategy (`actions.py`)
+
+기존의 `force: True` 단일 전략을 5단계 점진적 전략으로 교체:
+
+```python
+# actions.py — execute_action() 내 click 처리
+# Phase 1: Modal Scope Check
+#   → 모달이 열려있으면 모달 내부 요소만 클릭 허용
+
+# Phase 2: Obstruction Detection + Resolution
+#   → check_obstruction() → 방해물 발견 시 resolve_obstruction()
+#   → 해결 후 재검사 (obstructed: false 확인)
+
+# Phase 3: Normal Click (scrollIntoView + click)
+#   → scrollIntoView({ block: 'center', behavior: 'instant' })
+#   → el.click() — React/Vue 이벤트 체인 정상 동작
+
+# Phase 4: dispatchEvent Fallback
+#   → new MouseEvent('click', { bubbles: true, cancelable: true })
+#   → mousedown → mouseup → click 전체 시퀀스 dispatch
+#   → Phase 3 실패 시 (예: Shadow DOM, custom element)
+
+# Phase 5: Force Click (최후 수단)
+#   → page.locator(...).click(force=True)
+#   → SPA 핸들러 우회 가능성 있지만, 위 4단계 모두 실패 시에만
+```
+
+**핵심 원칙**: normal click을 최우선으로 시도하여 SPA 이벤트 시스템을 존중.
+force click은 모든 수단이 실패한 최후에만 사용.
+
+#### Pillar 3: Post-Action State Fingerprint (`agent_loop.py` + `client.py`)
+
+클릭 전후의 페이지 상태를 구조적으로 비교하여 "실제로 변화가 발생했는지" 판별:
+
+```python
+# browser.py — get_state_fingerprint(page)
+_STATE_FINGERPRINT_JS = '''
+() => ({
+    url: location.href,
+    title: document.title,
+    has_modal: !!(document.querySelector('[role=dialog]') ||
+              document.querySelector('.modal.show')),
+    focus_tag: document.activeElement?.tagName || '',
+    interactive_count: document.querySelectorAll(
+        'a,button,input,select,textarea,[role=button],[onclick]'
+    ).length
+})
+'''
+
+# agent_loop.py — 매 액션 전후 비교
+prev_fp = await browser.get_state_fingerprint(page)
+await execute_action(action, page, browser=browser)
+post_fp = await browser.get_state_fingerprint(page)
+
+state_changed = (prev_fp != post_fp)
+if not state_changed:
+    no_change_count += 1
+if no_change_count >= 2:
+    # invoke_llm()에 경고 전달
+    no_state_change_warning = True
+```
+
+**LLM Anti-Hallucination 규칙** (`client.py` SYSTEM_PROMPT Rule 8):
+```
+Rule 8: 직전 액션 이후 페이지 상태가 변하지 않았다면,
+같은 액션을 반복하지 마세요. 특히 모달/폼이 실제로 열렸는지
+확인 없이 input 액션을 시도하지 마세요.
+```
+→ `no_state_change_warning=True`일 때 LLM 프롬프트에 주입되어
+   상태 변화 없는 상황에서의 hallucination 차단.
+
+**검증 결과 (hogangnono.com)**:
+```
+1. resolve_blocker() → "게이트웨이 광고" 팝업 제거 (dom_removal) ✅
+2. check_obstruction(aidx=116) → div.css-1sry7v (fixed, z-index:15) 탐지 ✅
+3. resolve_obstruction() → css_hide (display:none) 적용 ✅
+4. 재검사 → obstructed: false ✅
+5. Normal click (force 없이!) → 성공 ✅
+6. State fingerprint → interactive_count 76→88, state_changed=True ✅
+```
+
+**변경 파일 (6개)**:
+| 파일 | 변경 내용 |
+|------|----------|
+| `src/core/browser.py` | `check_obstruction()`, `resolve_obstruction()`, `get_state_fingerprint()` 추가 |
+| `src/core/actions.py` | force click → 5-Phase 전략으로 전면 교체 |
+| `src/core/agent_loop.py` | fingerprint 비교 + `no_state_change_warning` 전달 |
+| `src/llm/client.py` | SYSTEM_PROMPT Rule 8 + `no_state_change_warning` 파라미터 |
+| `src/core/state.py` | Interaction Scope (Phase 7-A 모달 감지) — 이전 세션 구현 |
+| `test_obstruction.py` | hogangnono.com 통합 테스트 (신규) |
+
+**Phase 1-B 이후 개선 방향**:
+- 로그인 모달 감지 강화: ARIA 속성 없는 모달도 탐지 (visibility/display 변화 감시, MutationObserver)
+- Obstruction 패턴 캐시: 사이트별로 발견된 blocker 셀렉터를 저장하여 재방문 시 즉시 제거
+- resolve_obstruction 전략 우선순위 학습: 사이트별 성공률 기반 전략 순서 최적화
+- interactive_count 외 추가 fingerprint: DOM 트리 해시, scroll position, network idle 상태
+- Phase 4 (dispatchEvent) 고도화: PointerEvent 지원, Touch 이벤트 시뮬레이션 (모바일 뷰)
+
+### 13. `asyncio` 변수 스코핑 버그 — click/input 액션 실행 실패 (2026-03-06)
+
+**현상**: Obstruction 기반 아키텍처(Section 12) 적용 후, 차단 해소까지는 성공하지만
+그 직후 `await asyncio.sleep(0.3)` 호출 시 `cannot access local variable 'asyncio' where it is not associated with a value` 에러 발생.
+click 액션은 차단이 이미 제거된 재시도에서 해당 라인을 타지 않아 우연히 성공하지만,
+input 액션은 매번 차단 해소 → sleep 경로를 거쳐 5회 연속 실패.
+
+**근본 원인**: `execute_action()` 함수 내 `case "wait":` 블록(line 366)에 `import asyncio`가 중복 존재.
+Python은 함수 컴파일 시 해당 import를 **함수 전체의 로컬 변수 할당**으로 인식.
+`match/case`는 별도 스코프가 아닌 동일 함수 스코프이므로,
+`case "click"`이나 `case "input"`에서 `asyncio.sleep()`을 호출할 때
+아직 할당되지 않은 로컬 변수에 접근 → `UnboundLocalError`.
+
+```
+actions.py 내 asyncio 참조 구조:
+
+line  12: import asyncio              ← 모듈 레벨 (정상)
+line 215: await asyncio.sleep(0.3)    ← case "click" 내부 (모듈 레벨 참조 기대)
+line 290: await asyncio.sleep(0.3)    ← case "input" 내부 (모듈 레벨 참조 기대)
+line 366: import asyncio              ← case "wait" 내부 (❌ 함수 전체를 오염)
+
+→ Python 컴파일러: line 366 때문에 asyncio를 로컬로 판단
+→ line 215, 290 실행 시 로컬 asyncio가 아직 바인딩 안 됨 → UnboundLocalError
+```
+
+**해결**: `case "wait":` 내부의 중복 `import asyncio` (line 366) 삭제.
+모듈 레벨 import (line 12)로 충분.
+
+**변경 파일 (1개)**:
+| 파일 | 변경 내용 |
+|------|----------|
+| `src/core/actions.py` | `case "wait":` 내부의 `import asyncio` 1줄 삭제 |
+
+**Phase 1-B 이후 개선 방향**:
+- 함수 내부 import 패턴 전수 검사 (같은 유형의 스코핑 버그 예방)
+- `import base64` (line 355, `case "screenshot"`)도 동일 패턴이나 다른 case에서 base64를 참조하지 않아 현재는 무해. 향후 참조 추가 시 같은 버그 발생 가능
+
 ### Phase 2: 자가학습 + VLM 실험 (2-4개월)
 
 **목표**: 패턴 학습으로 반복 비용 감소 + VLM 효과 실증

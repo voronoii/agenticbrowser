@@ -128,7 +128,14 @@
 </div>
 </div>
 <!-- Sidebar Footer -->
-<div class="p-5 border-t border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-background-dark/50">
+<div class="p-5 border-t border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-background-dark/50 space-y-3">
+<label class="flex items-center gap-2 cursor-pointer select-none">
+<input id="preview-checkbox" type="checkbox" checked class="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-primary focus:ring-primary focus:ring-offset-0" />
+<span class="text-sm font-medium text-slate-600 dark:text-slate-400 flex items-center gap-1">
+<span class="material-symbols-outlined text-sm">photo_camera</span>
+실시간 프리뷰
+</span>
+</label>
 <button id="execute-btn" class="w-full py-3 bg-primary hover:bg-primary/90 text-white rounded-lg font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-primary/20">
 <span class="material-symbols-outlined" id="execute-icon">play_arrow</span>
 <span id="execute-text">Execute Agent Task</span>
@@ -219,6 +226,7 @@ const browserPlaceholder = document.getElementById('browser-placeholder');
 const browserScreenshot = document.getElementById('browser-screenshot');
 const logStream = document.getElementById('log-stream');
 const runtimeDisplay = document.getElementById('runtime-display');
+const previewCheckbox = document.getElementById('preview-checkbox');
 
 let ws = null;
 let isRunning = false;
@@ -301,22 +309,38 @@ function handleMessage(msg) {
             break;
 
         case 'step':
-            // 스텝 로그 추가
-            const stepAgent = msg.success ? 'Executor' : 'System';
-            addLog(stepAgent, `Step ${msg.step}: ${msg.detail}`, msg.timestamp);
-            // URL 업데이트
-            if (msg.url) browserUrl.textContent = msg.url.replace(/^https?:\/\//, '');
-            // 스크린샷 업데이트
-            if (msg.screenshot) {
-                browserScreenshot.src = `data:image/jpeg;base64,${msg.screenshot}`;
-                browserScreenshot.classList.remove('hidden');
-                browserPlaceholder.classList.add('hidden');
+            if (msg.event === 'tool_start') {
+                // v2: 도구 호출 시작
+                const inputStr = typeof msg.input === 'object' ? JSON.stringify(msg.input) : String(msg.input || '');
+                addLog('Executor', `▶ ${msg.tool}(${inputStr.slice(0, 120)})`);
+            } else if (msg.event === 'tool_end') {
+                // v2: 도구 호출 완료
+                addLog('Executor', `✓ ${msg.tool}: ${(msg.output || '').slice(0, 200)}`);
+                // URL 업데이트
+                if (msg.url) browserUrl.textContent = msg.url.replace(/^https?:\/\//, '');
+                // 스크린샷 업데이트
+                if (msg.screenshot) {
+                    browserScreenshot.src = `data:image/jpeg;base64,${msg.screenshot}`;
+                    browserScreenshot.classList.remove('hidden');
+                    browserPlaceholder.classList.add('hidden');
+                }
+            } else {
+                // v1: 기존 포맷 호환
+                const stepAgent = msg.success ? 'Executor' : 'System';
+                addLog(stepAgent, `Step ${msg.step}: ${msg.detail}`, msg.timestamp);
+                if (msg.url) browserUrl.textContent = msg.url.replace(/^https?:\/\//, '');
+                if (msg.screenshot) {
+                    browserScreenshot.src = `data:image/jpeg;base64,${msg.screenshot}`;
+                    browserScreenshot.classList.remove('hidden');
+                    browserPlaceholder.classList.add('hidden');
+                }
             }
             break;
 
         case 'result':
             const resultIcon = msg.success ? '✓' : '✗';
-            addLog('System', `${resultIcon} 완료: ${msg.message} (${msg.total_steps}스텝, 실패 ${msg.failure_count}회)`);
+            const statsStr = msg.total_steps ? ` (${msg.total_steps}스텝, 실패 ${msg.failure_count}회)` : '';
+            addLog('System', `${resultIcon} 완료: ${msg.message}${statsStr}`);
             setRunning(false);
             setStatus('idle', 'Agent Online');
             break;
@@ -349,6 +373,16 @@ function addLog(agent, message, timestamp = null, isError = false) {
     `;
     logStream.appendChild(entry);
     logStream.scrollTop = logStream.scrollHeight;
+
+    // 서버에 로그 전송 (Python logger에 기록)
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+            type: 'ui_log',
+            agent: agent,
+            message: message,
+            is_error: isError,
+        }));
+    }
 }
 
 // 상태 표시 업데이트
@@ -438,6 +472,7 @@ executeBtn.addEventListener('click', () => {
             goal: goal,
             start_url: startUrlInput.value.trim() || null,
             direction: directionInput.value.trim() || null,
+            preview: previewCheckbox.checked,
         }));
     }
 });
