@@ -60,6 +60,7 @@ class BrowserToolState:
         self.memos: list[str] = []
         self.task_complete: bool = False
         self.task_result: Optional[str] = None
+        self.ask_human_callback: Optional[callable] = None
 
 
 def create_browser_tools(browser: BrowserManager) -> list:
@@ -186,6 +187,26 @@ def create_browser_tools(browser: BrowserManager) -> list:
         try:
             await handle.fill(text)
             return f'[{index}] "{text}" 입력 완료'
+        except Exception as fill_err:
+            logger.warning(f"[{index}] fill 실패, keyboard.type 폴백 시도: {fill_err}")
+
+        # fill 실패 시 폴백: 내부 input 검색 → keyboard.type
+        try:
+            # 커스텀 컴포넌트(div[role=searchbox] 등)일 수 있으므로 내부 input 찾기
+            inner_input = handle.locator("input, textarea, [contenteditable]").first
+            if await inner_input.count() > 0:
+                await inner_input.click(timeout=3000)
+                await inner_input.fill(text)
+                return f'[{index}] "{text}" 입력 완료 (내부 input)'
+        except Exception:
+            pass
+
+        # 최후 수단: 포커스 후 키보드로 직접 타이핑
+        try:
+            await handle.click(timeout=3000)
+            await page.keyboard.press("Control+a")
+            await page.keyboard.type(text, delay=30)
+            return f'[{index}] "{text}" 입력 완료 (keyboard.type)'
         except Exception as e:
             return f'[{index}] 텍스트 입력 실패: {e}'
 
@@ -316,11 +337,30 @@ def create_browser_tools(browser: BrowserManager) -> list:
         shared.task_result = result
         return f"__TASK_COMPLETE__\n{result}"
 
+    @tool
+    async def ask_human(question: str) -> str:
+        """사용자에게 질문하고 응답을 기다립니다.
+        정말 사용자만 결정할 수 있는 경우에만 사용하세요.
+        (예: 비밀번호 입력, 결제 확인, 대량 수집 시 계속 여부 확인)
+
+        Args:
+            question: 사용자에게 보여줄 질문
+        """
+        if shared.ask_human_callback is None:
+            return "ask_human을 사용할 수 없습니다. 직접 판단하여 진행하세요."
+
+        try:
+            response = await shared.ask_human_callback(question)
+            return f"사용자 응답: {response}"
+        except Exception as e:
+            logger.error(f"ask_human 오류: {e}")
+            return f"사용자 응답 수신 실패: {e}. 직접 판단하여 진행하세요."
+
     return {
         "tools": [
             observe_page, browser_click, browser_input, browser_navigate,
             browser_scroll, browser_keys, browser_select, browser_screenshot,
-            browser_wait, record_memo, complete_task,
+            browser_wait, record_memo, complete_task, ask_human,
         ],
         "shared": shared,
     }

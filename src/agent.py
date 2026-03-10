@@ -12,9 +12,9 @@ from deepagents import create_deep_agent
 from langgraph.checkpoint.memory import MemorySaver
 
 from src.core.browser import BrowserManager
-from src.v2.tools import create_browser_tools
-from src.v2.prompts import BROWSER_AGENT_PROMPT
-from src.v2.config import DEFAULT_MODEL, MAX_STEPS
+from src.tools import create_browser_tools
+from src.prompts import BROWSER_AGENT_PROMPT
+from src.config import DEFAULT_MODEL, MAX_STEPS
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,10 @@ async def run_browser_agent(
         parts.append(f"\n## 추가 지시\n{direction}")
     instruction = "\n".join(parts)
 
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": MAX_STEPS * 3,  # 도구 호출당 ~3 그래프 노드
+    }
 
     result = None
     try:
@@ -101,7 +104,11 @@ async def run_browser_agent(
 
             elif kind == "on_tool_end" and on_tool_call:
                 output = event["data"].get("output", "")
-                output_str = str(output)
+                # ToolMessage 객체에서 content 추출
+                if hasattr(output, "content"):
+                    output_str = str(output.content)
+                else:
+                    output_str = str(output)
 
                 await on_tool_call({
                     "type": "tool_end",

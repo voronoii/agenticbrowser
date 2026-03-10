@@ -38,6 +38,34 @@
         .terminal-scroll::-webkit-scrollbar { width: 6px; }
         .terminal-scroll::-webkit-scrollbar-track { background: transparent; }
         .terminal-scroll::-webkit-scrollbar-thumb { background: #323767; border-radius: 10px; }
+        /* Resize Handle */
+        .resize-handle {
+            height: 6px;
+            cursor: row-resize;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            user-select: none;
+            flex-shrink: 0;
+            position: relative;
+            z-index: 10;
+        }
+        .resize-handle::after {
+            content: '';
+            width: 40px;
+            height: 3px;
+            border-radius: 2px;
+            background: #94a3b8;
+            transition: background 0.15s, width 0.15s;
+        }
+        .resize-handle:hover::after,
+        .resize-handle.active::after {
+            background: #6366f1;
+            width: 56px;
+        }
+        .resize-handle:hover {
+            background: rgba(99, 102, 241, 0.06);
+        }
     </style>
 </head>
 <body class="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 min-h-screen flex flex-col overflow-hidden">
@@ -179,8 +207,10 @@
 </div>
 </div>
 </div>
+<!-- Resize Handle -->
+<div id="resize-handle" class="resize-handle mx-6"></div>
 <!-- Agent Logic Stream (Terminal) -->
-<div class="h-72 px-6 pb-6 shrink-0">
+<div id="log-panel" class="px-6 pb-6 shrink-0" style="height: 288px;">
 <div class="h-full bg-white dark:bg-slate-950 rounded-xl border border-slate-200 dark:border-slate-800 shadow-lg flex flex-col overflow-hidden">
 <div class="h-10 flex items-center justify-between px-4 border-b border-slate-100 dark:border-slate-900 bg-slate-50 dark:bg-slate-900/50">
 <div class="flex items-center gap-2">
@@ -529,6 +559,51 @@ function hideHumanInput() {
     const container = document.getElementById('human-input-container');
     if (container) container.remove();
 }
+
+// === Resize Handle ===
+(function() {
+    const handle = document.getElementById('resize-handle');
+    const browserPanel = handle.previousElementSibling;
+    const logPanel = document.getElementById('log-panel');
+    const mainEl = browserPanel.parentElement;
+    let isDragging = false;
+    let startY, startBrowserH, startLogH;
+
+    handle.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        isDragging = true;
+        startY = e.clientY;
+        startBrowserH = browserPanel.offsetHeight;
+        startLogH = logPanel.offsetHeight;
+        handle.classList.add('active');
+        document.body.style.cursor = 'row-resize';
+        document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const dy = e.clientY - startY;
+        const minH = 100;
+        const newBrowserH = Math.max(minH, startBrowserH + dy);
+        const newLogH = Math.max(minH, startLogH - dy);
+
+        // 전체 영역을 넘지 않도록 제한
+        const totalH = startBrowserH + startLogH;
+        if (newBrowserH + newLogH > totalH + 2) return;
+
+        browserPanel.style.flex = 'none';
+        browserPanel.style.height = newBrowserH + 'px';
+        logPanel.style.height = newLogH + 'px';
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (!isDragging) return;
+        isDragging = false;
+        handle.classList.remove('active');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+    });
+})();
 
 // 페이지 로드 시 WebSocket 연결
 connectWS();

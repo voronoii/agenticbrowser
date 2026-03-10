@@ -14,12 +14,9 @@ RUN playwright install chromium
 # 소스 복사
 COPY src/ src/
 
-# 포트
-EXPOSE 1234
-
 # 컨테이너 내부에서는 항상 headless
 ENV HEADLESS=true
 ENV PYTHONUNBUFFERED=1
 
-# 서버 실행 (reload 끄기 — 프로덕션 배포용)
-CMD ["python", "-m", "uvicorn", "src.server:app", "--host", "0.0.0.0", "--port", "1234"]
+# 서버 실행 — 포트는 .env의 SERVER_PORT (기본 1234)
+CMD ["python", "-m", "src.server"]

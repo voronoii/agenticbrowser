@@ -2,7 +2,7 @@ services:
   agentic-browser:
     build: .
     ports:
-      - "1234:1234"
+      - "${SERVER_PORT:-1234}:${SERVER_PORT:-1234}"
     env_file:
       - .env
     volumes:

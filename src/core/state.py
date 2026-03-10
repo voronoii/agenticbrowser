@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 # JavaScript: 인터랙티브 요소 추출 + data-aidx 주입
 # ---------------------------------------------------------------------------
 _EXTRACT_JS = """() => {
+    // ── Phase 0: 이전 data-aidx 속성 전체 제거 ──
+    // 이전 observe 호출에서 남은 속성이 있으면 locator 충돌 발생
+    document.querySelectorAll('[data-aidx]').forEach(el => el.removeAttribute('data-aidx'));
+
     // ── Phase 1: 표준 인터랙티브 요소 수집 ──
     const INTERACTIVE_SELECTOR = [
         'a[href]', 'button', 'input', 'select', 'textarea', 'summary',
